@@ -46,8 +46,6 @@ from glanceclient.exc import HTTPNotFound
 # Configuration
 #
 
-admin_pass = ""
-auth_url = "http://127.0.0.1:35357/v2.0"
 glance_backup_prefix = "os_bkp_"
 nova_snapshot_timeout = 10
 nova_snapshot_tries = 600
@@ -214,7 +212,10 @@ def backup_nova(backup_base_path, tenant):
     Params: backup directory name, tenant object
     """
     backups = {}
-    nova = nova_client.Client(username='admin', api_key=admin_pass, auth_url=auth_url, project_id=tenant.name)
+    nova = nova_client.Client(username=os.environ["OS_USERNAME"],
+                              api_key=os.environ["OS_PASSWORD"],
+                              auth_url=os.environ["OS_AUTH_URL"],
+                              project_id=tenant.name)
     glance = get_glance_client()
 
     ensure_dir_exists(os.path.join(backup_base_path, "nova"))
@@ -231,7 +232,10 @@ def cleanup_nova_backup():
     """
     On exit reset all active vms that are still in task image uploading
     """
-    nova = nova_client.Client(username='admin', api_key=admin_pass, auth_url=auth_url, project_id=tenant.name)
+    nova = nova_client.Client(username=os.environ["OS_USERNAME"],
+                              api_key=os.environ["OS_PASSWORD"],
+                              auth_url=os.environ["OS_AUTH_URL"],
+                              project_id=tenant.name)
     pool = Pool()
     vm_ids = (vm.id for vm in nova.servers.list() if getattr(vm, 'OS-EXT-STS:task_state') == task_states.IMAGE_UPLOADING and \
                                                      vm.status.lower() == 'active')
@@ -324,7 +328,11 @@ def backup_cinder_volume(volume):
     Params: volume object
     """
     backup = None
-    cinder = cinder_client.Client('1', 'admin', admin_pass, tenant.name, auth_url)
+    cinder = cinder_client.Client('1',
+                                  os.environ["OS_USERNAME"],
+                                  os.environ["OS_PASSWORD"],
+                                  tenant.name,
+                                  os.environ["OS_AUTH_URL"])
 
     if volume.status != "error_restoring":
         print "Backing up metadata of cinder volume " + volume.display_name
@@ -350,7 +358,11 @@ def backup_cinder(backup_base_path, tenant):
     """
     backups = []
     ensure_dir_exists(os.path.join(backup_base_path, "cinder"))
-    cinder = cinder_client.Client('1', 'admin', admin_pass, tenant.name, auth_url)
+    cinder = cinder_client.Client('1',
+                                  os.environ["OS_USERNAME"],
+                                  os.environ["OS_PASSWORD"],
+                                  tenant.name,
+                                  os.environ["OS_AUTH_URL"])
 
     for volume in cinder.volumes.list():
         backup = backup_cinder_volume(volume)
@@ -369,7 +381,11 @@ def cinder_check_volume_backup(params):
     """
     index = params[0]
     backup_id = params[1]
-    cinder = cinder_client.Client('1', 'admin', admin_pass, tenant.name, auth_url)
+    cinder = cinder_client.Client('1',
+                                  os.environ["OS_USERNAME"],
+                                  os.environ["OS_PASSWORD"],
+                                  tenant.name,
+                                  os.environ["OS_AUTH_URL"])
 
     try:
         backup = cinder.backups.get(backup_id)
@@ -429,7 +445,10 @@ if __name__ == '__main__':
     sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 
     # Get keystone client
-    keystone = keystone_client.Client(auth_url=auth_url, username="admin", password=admin_pass, tenant_name="admin")
+    keystone = keystone_client.Client(auth_url=os.environ["OS_AUTH_URL"],
+                                      username=os.environ["OS_USERNAME"],
+                                      password=os.environ["OS_PASSWORD"],
+                                      tenant_name=os.environ["OS_TENANT_NAME"])
 
     # Retrieve tenant object
     tenant = None

@@ -26,7 +26,6 @@
 import os
 import sys
 import time
-import string
 from multiprocessing import Pool, TimeoutError
 from novaclient.exceptions import Conflict as NovaConflict
 import keystoneclient.v2_0.client as keystone_client
@@ -41,8 +40,6 @@ from glanceclient.exc import HTTPNotFound
 # Configuration
 #
 
-admin_pass = ""
-auth_url = "http://127.0.0.1:35357/v2.0"
 vm_shutdown_timeout = 30
 
 
@@ -75,10 +72,13 @@ def remove_nova_vms(tenant):
     Params: tenant object
     """
     stopping_vms = []
-    nova = nova_client.Client(username='admin', api_key=admin_pass, auth_url=auth_url, project_id=tenant.name)
+    nova = nova_client.Client(username=os.environ["OS_USERNAME"],
+                              api_key=os.environ["OS_PASSWORD"],
+                              auth_url=os.environ["OS_AUTH_URL"],
+                              project_id=tenant.name)
 
     for vm in nova.servers.list():
-        if string.lower(vm.status) == 'active':
+        if vm.status.lower() == 'active':
             print "Stopping vm " + vm.name
             vm.stop()
             stopping_vms.append(vm.id)
@@ -97,7 +97,11 @@ def remove_cinder_volumes(tenant):
     Delete all cinder volumes
     Params: tenant object
     """
-    cinder = cinder_client.Client('1', 'admin', admin_pass, tenant.name, auth_url)
+    cinder = cinder_client.Client('1',
+                                  os.environ["OS_USERNAME"],
+                                  os.environ["OS_PASSWORD"],
+                                  tenant.name,
+                                  os.environ["OS_AUTH_URL"])
 
     for volume in cinder.volumes.list():
         if volume.status == 'in-use':
@@ -128,7 +132,10 @@ if __name__ == '__main__':
     sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 
     # Get keystone client and tenant
-    keystone = keystone_client.Client(auth_url=auth_url, username="admin", password=admin_pass, tenant_name="admin")
+    keystone = keystone_client.Client(auth_url=os.environ["OS_AUTH_URL"],
+                                      username=os.environ["OS_USERNAME"],
+                                      password=os.environ["OS_PASSWORD"],
+                                      tenant_name="admin")
     tenant = None
 
     try:
