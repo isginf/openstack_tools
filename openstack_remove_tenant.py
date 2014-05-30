@@ -41,7 +41,7 @@ from glanceclient.exc import HTTPNotFound
 # Configuration
 #
 
-admin_pass = "GJHt0QNaimPGdeGiD7u6"
+admin_pass = ""
 auth_url = "http://127.0.0.1:35357/v2.0"
 vm_shutdown_timeout = 30
 
