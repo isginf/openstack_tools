@@ -61,12 +61,12 @@ def remove_glance_images(tenant):
     image_ids = (img.id for img in glance.images.list() if img.owner == tenant.id and not img.visibility == 'public')
 
     for img in image_ids:
-        print "Removing image " + img.name
+        print "Removing image " + img
 
         try:
-            glance.images.delete(img.id)
+            glance.images.delete(img)
         except HTTPNotFound:
-            print "Could not find image " + img.name
+            print "Could not find image " + img
 
 
 def remove_nova_vms(tenant):
