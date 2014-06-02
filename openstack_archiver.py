@@ -462,6 +462,12 @@ if __name__ == '__main__':
     backup_base_path = '/local/openstack_backup/' + tenant.id
     ensure_dir_exists(backup_base_path)
 
+    # Check that admin user is in the tenant we want to backup
+    # otherwise add him
+    if not filter(lambda x: x.username == os.environ['OS_USERNAME'], tenant.list_users()):
+        tenant.add_user(keystone.users.find(name = os.environ['OS_USERNAME']),
+                        keystone.roles.find(name = 'admin'))
+
     # Backup all stuff
     backup_keystone(backup_base_path, tenant)
     backup_nova(backup_base_path, tenant)
