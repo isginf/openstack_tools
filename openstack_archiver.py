@@ -28,9 +28,10 @@
 
 import os
 import sys
-import time
 import json
 import atexit
+import functools
+from time import sleep
 from multiprocessing import Pool, TimeoutError
 from novaclient.exceptions import Conflict as NovaConflict
 import keystoneclient.v2_0.client as keystone_client
@@ -46,9 +47,9 @@ from glanceclient.exc import HTTPNotFound
 # Configuration
 #
 
-glance_backup_prefix = "os_bkp_"
-nova_snapshot_timeout = 10
-nova_snapshot_tries = 600
+glance_backup_prefix = "os_bkp"
+glance_upload_timeout = 900
+glance_upload_wait = 900
 glance_download_timeout = 600
 cinder_backup_timeout = 10
 cinder_backup_tries = 600
@@ -131,79 +132,29 @@ def backup_keystone(backup_base_path, tenant):
 #
 # NOVA
 #
-def nova_check_snapshot_upload(params):
-    """
-    Check if a nova snapshot upload has finished
-    Params: tupel of snapshot id, vm name
-    Returns: True for success, False for failure or None for not finished
-    """
-    glance = get_glance_client()
-    snapshot_id = params[0]
-    vm_name = params[1]
-
-    try:
-        backup_image = glance.images.get(snapshot_id)
-        print "Snapshot of " + vm_name + " " + backup_image.status
-
-        if backup_image.status.lower() == 'active':
-            return (snapshot_id, True)
-    except glance_client.exc.HTTPNotFound, e:
-        print "\nFailed to backup image of vm " + vm_name + "\n" + str(e) + "\n"
-        return (snapshot_id, False)
-
-    return (snapshot_id, None)
-
-
-def wait_for_nova_snapshot_to_finish(backups):
-    """
-    Wait until all nova snapshot have finished (or failed)
-    Params: dictionary of snapshot id and vm name
-    """
-    pool = Pool()
-    glance = get_glance_client()
-    snapshot_tries = nova_snapshot_tries
-
-    while 1:
-        jobs = pool.map_async(nova_check_snapshot_upload, backups.items())
-
-        try:
-            for (backup_id, success) in jobs.get(nova_snapshot_timeout):
-                if success:
-                    download_glance_image(backup_id, os.path.join(backup_base_path, "nova", "vm_" + backups[backup_id] + ".img"))
-                    glance.images.delete(backup_id)
-
-                if success == False:
-                    del backups[backup_id]
-                    glance.images.delete(backup_id)
-        except HTTPNotFound:
-            if backups.get(backup_id):
-                del backups[backup_id]
-        except TimeoutError:
-            print "Got timeout"
-
-        if len(backups) == 0 or snapshot_tries == 0:
-           break
-        else:
-           snapshot_tries -= 1
-           time.sleep(1)
-
-
 def backup_nova_vm(srv):
     """
     Save vm meta data as json file and make a snapshot of the given vm
     Params: nova server object
     """
+    bad_status = ['Error', 'image_uploading']
     print "Backing up metadata of vm " + srv.name
     dump_openstack_obj(srv, os.path.join(backup_base_path, "nova", "vm_" + srv.name + ".json"))
+
+    # reset vm if it's in a bad state for image uploading
+    if srv.status in bad_status or getattr(srv, 'OS-EXT-STS:task_state') in bad_status:
+        print "Vm " + srv.name + " in bad state " + srv.status + " (" + getattr(srv, 'OS-EXT-STS:task_state') + "). Resetting."
+        srv.reset_state('active')
+        sleep(1)
 
     print "Creating backup image of vm " + srv.name
 
     try:
-        backup_image_id = srv.create_image(glance_backup_prefix + srv.name)
-        return backup_image_id
+        backup_id = srv.create_image(glance_backup_prefix + "_" + tenant.name + "_" + srv.name)
+        return backup_id
     except NovaConflict, e:
         print "\nERROR creating snapshot of vm " + srv.name + "\n" + str(e) + "\n"
-        return (None, None)
+        return None
 
 
 def backup_nova(backup_base_path, tenant):
@@ -222,10 +173,12 @@ def backup_nova(backup_base_path, tenant):
 
     for srv in nova.servers.list():
         backup_image_id = backup_nova_vm(srv)
-        backups[backup_image_id] = srv.name
+
+        if backup_image_id:
+            backups[backup_image_id] = srv.name
 
     # wait for snapshots to finish
-    wait_for_nova_snapshot_to_finish(backups)
+    wait_for_glance_upload_to_finish(backups, output_dir="nova")
 
 
 def cleanup_nova_backup():
@@ -256,19 +209,97 @@ def get_glance_client():
     return glance_client.Client('2',glance_endpoint, token=keystone.auth_token)
 
 
+def glance_check_upload(params, output_dir):
+    """
+    Check if an upload to glance has finished
+    If one has finished start a download immediately
+    Params: tupel of image id, name for output, output directory name relative to backup_base_path
+    Returns: True for success, False for failure or None for not finished
+    """
+    glance = get_glance_client()
+    image_id = params[0]
+    display_name = params[1]
+
+    try:
+        backup_image = glance.images.get(image_id)
+        print "Upload of " + display_name + " is " + backup_image.status
+
+        if backup_image.status.lower() == 'active':
+            download_glance_image(image_id, os.path.join(backup_base_path, output_dir, display_name + ".img"))
+            return (image_id, True)
+    except glance_client.exc.HTTPNotFound, e:
+        print "\nFailed to get status of image " + display_name + "\n" + str(e) + "\n"
+        return (image_id, False)
+
+    return (image_id, None)
+
+
+# No functools.partial with multiprocess on 2.6 :(
+# (see http://bugs.python.org/issue5228)
+def nova_glance_check_upload(params):
+    return glance_check_upload(params, "nova")
+
+def cinder_glance_check_upload(params):
+    return glance_check_upload(params, "cinder")
+
+def wait_for_glance_upload_to_finish(backups, output_dir):
+    """
+    Wait until all glance uploads have finished (or failed)
+    Params: dictionary of snapshot id and vm name
+    """
+    pool = Pool()
+    check_func = None
+    glance = get_glance_client()
+    upload_wait = glance_upload_wait
+
+    if output_dir == "nova":
+        check_func = nova_glance_check_upload
+    else:
+        check_func = cinder_glance_check_upload
+
+    while 1:
+        try:
+            jobs = pool.map_async(check_func, backups.items())
+
+            for (backup_id, success) in jobs.get(glance_upload_timeout):
+                if success:
+                    glance.images.delete(backup_id)
+
+                if success == False:
+                    del backups[backup_id]
+                    glance.images.delete(backup_id)
+        except HTTPNotFound:
+            if backups.get(backup_id):
+                del backups[backup_id]
+        except TimeoutError:
+            print "Got timeout"
+
+        if len(backups) == 0 or upload_wait == 0:
+           break
+        else:
+           upload_wait -= 1
+           sleep(3)
+
+
 def download_glance_image(image_id, output_file):
     """
     Download a glance image specified by image_id and save it into output_file
     Params: image_id, output_file name
     """
     glance = get_glance_client()
+
     print "Downloading image " + image_id
     fh = open(output_file, "wb")
 
-    for chunk in glance.images.data(image_id):
-        fh.write(chunk)
+    try:
+        for chunk in glance.images.data(image_id):
+            fh.write(chunk)
 
-    fh.close()
+    except HTTPNotFound, e:
+        print "Error downloading image " + image_id + ": " + str(e)
+    finally:
+        fh.close()
+
 
 def backup_glance_image(img):
     """
@@ -322,33 +353,36 @@ def detach_volume(volume):
             return False
     return True
 
+
 def backup_cinder_volume(volume):
     """
     Save volume meta data as json file and trigger a backup of the volume
     Params: volume object
     """
-    backup = None
+    backup_id = None
+    backup_name = None
     cinder = cinder_client.Client('1',
                                   os.environ["OS_USERNAME"],
                                   os.environ["OS_PASSWORD"],
                                   tenant.name,
                                   os.environ["OS_AUTH_URL"])
 
-    if volume.status != "error_restoring":
-        print "Backing up metadata of cinder volume " + volume.display_name
-        dump_openstack_obj(volume, os.path.join(backup_base_path, "cinder", "vol_" + volume.display_name + ".json"))
+    print "Backing up metadata of cinder volume " + volume.display_name
+    dump_openstack_obj(volume, os.path.join(backup_base_path, "cinder", "vol_" + volume.display_name + ".json"))
 
-        if detach_volume(volume):
-            print "Backing up volume " + volume.display_name
+    if detach_volume(volume):
+        print "Backing up volume " + volume.display_name
 
-            try:
-                backup = cinder.backups.create(volume.id)
-            except BadRequest, e:
-                print "ERROR volume " + volume.display_name + " could not be backuped!\n" + str(e) + "\n"
-            except ClientException, e:
-                print "ERROR volume " + volume.display_name + " could not be backuped!\n" + str(e) + "\n"
+        try:
+            resp = cinder.volumes.upload_to_image(volume, True, glance_backup_prefix + "_" + tenant.name + "_" + volume.display_name, "bare", "raw")
+            backup_id = resp[1]['os-volume_upload_image']['image_id']
+            backup_name = resp[1]['os-volume_upload_image']['image_name']
+        except BadRequest, e:
+            print "ERROR volume " + volume.display_name + " could not be backuped!\n" + str(e) + "\n"
+        except ClientException, e:
+            print "ERROR volume " + volume.display_name + " could not be backuped!\n" + str(e) + "\n"
 
-    return backup
+    return (backup_id, backup_name)
 
 
 def backup_cinder(backup_base_path, tenant):
@@ -356,7 +390,7 @@ def backup_cinder(backup_base_path, tenant):
     Backup all cinder data
     Params: backup directory name, tenant object
     """
-    backups = []
+    backups = {}
     ensure_dir_exists(os.path.join(backup_base_path, "cinder"))
     cinder = cinder_client.Client('1',
                                   os.environ["OS_USERNAME"],
@@ -365,70 +399,12 @@ def backup_cinder(backup_base_path, tenant):
                                   os.environ["OS_AUTH_URL"])
 
     for volume in cinder.volumes.list():
-        backup = backup_cinder_volume(volume)
+        (backup_id, backup_name) = backup_cinder_volume(volume)
 
-        if backup:
-            backups.append(backup.id)
+        if backup_id:
+            backups[backup_id] = backup_name
 
-    wait_for_cinder_backups_to_finish(backups)
-
-
-def cinder_check_volume_backup(params):
-    """
-    Check if a backup of a volume has finished
-    Params: tupel of index, volume backup id
-    Returns: True for success, False for failure or None for not finished
-    """
-    index = params[0]
-    backup_id = params[1]
-    cinder = cinder_client.Client('1',
-                                  os.environ["OS_USERNAME"],
-                                  os.environ["OS_PASSWORD"],
-                                  tenant.name,
-                                  os.environ["OS_AUTH_URL"])
-
-    try:
-        backup = cinder.backups.get(backup_id)
-
-        if backup.status != 'error' and backup.status != 'creating':
-            return (index, backup_id, True)
-        elif backup.status == 'error':
-            return (index, backup_id, False)
-    except ClientException, e:
-        print "Could not get status of cinder volume " + str(backup_id) + " " + str(e)
-        return (index, backup_id, False)
-
-    return (index, backup_id, None)
-
-
-def wait_for_cinder_backups_to_finish(backups):
-    """
-    Wait until all cinder backups have finished or failed
-    Params: list of cinder backup ids
-    """
-    pool = Pool()
-    glance = get_glance_client()
-    backup_tries = cinder_backup_tries
-
-    while 1:
-        jobs = pool.map_async(cinder_check_volume_backup, backups)
-
-        try:
-            for (i, backup_id, success) in jobs.get(cinder_backup_timeout):
-                if success:
-                    print "Backup of volume " + backup_id + " finished."
-                    del backups[i]
-                elif success == False:
-                    print "ERROR Backup of volume " + backup_id + " failed"
-                    del backups[i]
-        except TimeoutError:
-            print "Got timeout"
-
-        if len(backups) == 0 or backup_tries == 0:
-           break
-        else:
-           backup_tries -= 1
-           time.sleep(1)
+    wait_for_glance_upload_to_finish(backups, output_dir="cinder")
 
 
 #
