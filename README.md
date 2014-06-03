@@ -5,6 +5,7 @@ This is a collection of Openstack tools we use to manage clouds at the departeme
 at the ETH Zurich.
 
 - openstack_archiver.py to archivate all data of a project
+- openstack_cinder_backup.py to back up all cinder volumes which names start with backupme
 - openstack_migrator to automatically migrate all vms to other hypervisors on node shutdown
 - openstack_remove_tenant to delete all data that belongs to a specific project
 
