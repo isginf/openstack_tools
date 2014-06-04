@@ -27,12 +27,11 @@
 
 import os
 import sys
-from time import sleep
-from multiprocessing import Pool, TimeoutError
 import keystoneclient.v2_0.client as keystone_client
 from cinderclient.exceptions import ClientException, BadRequest, Unauthorized
 from openstack_lib import get_keystone_client, get_cinder_client, get_backup_base_path, ensure_dir_exists
 from openstack_lib import backup_cinder_volume, wait_for_glance_upload_to_finish, attach_volume
+#from openstack_lib import nova_glance_check_upload, cinder_glance_check_upload
 import openstack_lib
 
 
@@ -56,14 +55,15 @@ def backup_tenant(tenant):
     backups = {}
     attached = {}
 
-    ensure_dir_exists(os.path.join(get_backup_base_path(tenant), "cinder"))
+    ensure_dir_exists(get_backup_base_path(tenant.id))
+    ensure_dir_exists(os.path.join(get_backup_base_path(tenant.id), "cinder"))
 
     for volume in volumes:
         if volume.display_name.startswith("backupme"):
             (backup_id, backup_name) = backup_cinder_volume(tenant, volume)
 
             if backup_id:
-                backups[backup_id] = backup_name
+                backups[backup_id] = (tenant.id, backup_name)
 
                 if len(volume.attachments) > 0:
                     attached[backup_id] = {}

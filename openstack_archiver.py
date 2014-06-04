@@ -58,7 +58,7 @@ if __name__ == '__main__':
     except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
         tenant = keystone.tenants.get(sys.argv[1])
 
-    ensure_dir_exists(get_backup_base_path(tenant))
+    ensure_dir_exists(get_backup_base_path(tenant.id))
 
     # Check that admin user is in the tenant we want to backup
     # otherwise add him

@@ -45,7 +45,6 @@ from glanceclient.exc import HTTPNotFound
 
 GLANCE_BACKUP_PREFIX = "os_bkp"
 GLANCE_UPLOAD_TIMEOUT = 900
-GLANCE_CHECK_TIMEOUT = 3
 GLANCE_DOWNLOAD_TIMEOUT = 600
 CINDER_BACKUP_TIMEOUT = 10
 CINDER_BACKUP_TRIES = 600
@@ -56,12 +55,12 @@ BACKUP_BASE_PATH = '/var/openstack_backup/'
 # Subroutines
 #
 
-def get_backup_base_path(tenant):
+def get_backup_base_path(tenant_id):
     """
     Return the base directory for the backup
-    Params: tenant object
+    Params: tenant id
     """
-    return os.path.join(BACKUP_BASE_PATH, tenant.id)
+    return os.path.join(BACKUP_BASE_PATH, tenant_id)
 
 
 def dump_openstack_obj(obj, out_file=None):
@@ -128,7 +127,7 @@ def backup_keystone_user(tenant, user):
     """
     print "Backing up metadata of user " + user.name
 
-    return dump_openstack_obj(user, os.path.join(get_backup_base_path(tenant),
+    return dump_openstack_obj(user, os.path.join(get_backup_base_path(tenant.id),
                                                  "keystone",
                                                  "user_" + user.name + ".json"))
 
@@ -138,7 +137,7 @@ def backup_keystone(tenant):
     Backup all keystone data
     Params: tenant object
     """
-    backup_path = os.path.join(get_backup_base_path(tenant), "keystone")
+    backup_path = os.path.join(get_backup_base_path(tenant.id), "keystone")
     ensure_dir_exists(backup_path)
 
     print "Backing up metadata of tenant " + tenant.name
@@ -167,7 +166,7 @@ def backup_nova_vm(tenant, srv):
     """
     bad_status = ['Error', 'image_uploading']
     print "Backing up metadata of vm " + srv.name
-    dump_openstack_obj(srv, os.path.join(get_backup_base_path(tenant), "nova", "vm_" + srv.name + ".json"))
+    dump_openstack_obj(srv, os.path.join(get_backup_base_path(tenant.id), "nova", "vm_" + srv.name + ".json"))
 
     # reset vm if it's in a bad state for image uploading
     if srv.status in bad_status or getattr(srv, 'OS-EXT-STS:task_state') in bad_status:
@@ -194,13 +193,13 @@ def backup_nova(tenant):
     nova = get_nova_client(tenant)
     glance = get_glance_client()
 
-    ensure_dir_exists(os.path.join(get_backup_base_path(tenant), "nova"))
+    ensure_dir_exists(os.path.join(get_backup_base_path(tenant.id), "nova"))
 
     for srv in nova.servers.list():
         backup_image_id = backup_nova_vm(tenant, srv)
 
         if backup_image_id:
-            backups[backup_image_id] = srv.name
+            backups[backup_image_id] = (tenant.id, srv.name)
 
     # wait for snapshots to finish
     wait_for_glance_upload_to_finish(backups, tenant, output_dir="nova")
@@ -233,7 +232,7 @@ def get_glance_client():
     return glance_client.Client('2',glance_endpoint, token=keystone.auth_token)
 
 
-def glance_check_upload(params, tenant, output_dir):
+def glance_check_upload(params, output_dir):
     """
     Check if an upload to glance has finished
     If one has finished start a download immediately
@@ -242,14 +241,15 @@ def glance_check_upload(params, tenant, output_dir):
     """
     glance = get_glance_client()
     image_id = params[0]
-    display_name = params[1]
+    tenant_id = params[1][0]
+    display_name = params[1][1]
 
     try:
         backup_image = glance.images.get(image_id)
         print "Upload of " + display_name + " is " + backup_image.status
 
         if backup_image.status.lower() == 'active':
-            download_glance_image(image_id, os.path.join(get_backup_base_path(tenant), output_dir, display_name + ".img"))
+            download_glance_image(image_id, os.path.join(get_backup_base_path(tenant_id), output_dir, display_name + ".img"))
             return (image_id, True)
     except glance_client.exc.HTTPNotFound, e:
         print "\nFailed to get status of image " + display_name + "\n" + str(e) + "\n"
@@ -260,10 +260,16 @@ def glance_check_upload(params, tenant, output_dir):
 
 # No functools.partial with multiprocess on 2.6 :(
 # (see http://bugs.python.org/issue5228)
-def create_glance_check_upload(tenant, output_dir):
-    def myclosure(params):
-        return glance_check_upload(params, tenant, output_dir)
-    return myclosure
+#def create_glance_check_upload(tenant, output_dir):
+#    def myclosure(params):
+#        return glance_check_upload(params, tenant, output_dir)
+#    return myclosure
+
+def nova_glance_check_upload(params):
+    return glance_check_upload(params, "nova")
+
+def cinder_glance_check_upload(params):
+    return glance_check_upload(params, "cinder")
 
 def wait_for_glance_upload_to_finish(backups, tenant, output_dir):
     """
@@ -275,13 +281,19 @@ def wait_for_glance_upload_to_finish(backups, tenant, output_dir):
     check_func = None
     glance = get_glance_client()
     upload_wait = GLANCE_UPLOAD_TIMEOUT
-    check_func = create_glance_check_upload(tenant, output_dir)
+    #check_func = create_glance_check_upload(tenant, output_dir)
+    check_func = None
+
+    if output_dir == "nova":
+        check_func = nova_glance_check_upload
+    else:
+        check_func = cinder_glance_check_upload
 
     while 1:
         try:
-            jobs = pool.map_async(check_func, backups.items())
+            results = pool.map(check_func, backups.items())
 
-            for (backup_id, success) in jobs.get(GLANCE_CHECK_TIMEOUT):
+            for (backup_id, success) in results:
                 if success:
                     del backups[backup_id]
                     glance.images.delete(backup_id)
@@ -330,7 +342,7 @@ def backup_glance_image(tenant, img):
     Params: tenant object, image object
     """
     print "Backing up metadata of glance image " + img.name
-    backup_path = os.path.join(get_backup_base_path(tenant), "glance")
+    backup_path = os.path.join(get_backup_base_path(tenant.id), "glance")
     dump_openstack_obj(img, os.path.join(backup_path, img.name + ".json"))
     download_glance_image(img.id, os.path.join(backup_path, img.name + ".img"))
 
@@ -340,7 +352,7 @@ def backup_glance(tenant):
     Backup all glance data
     Params: tenant object
     """
-    ensure_dir_exists(os.path.join(get_backup_base_path(tenant), "glance"))
+    ensure_dir_exists(os.path.join(get_backup_base_path(tenant.id), "glance"))
     glance = get_glance_client()
     pool = Pool()
 
@@ -415,7 +427,7 @@ def backup_cinder_volume(tenant, volume):
     cinder = get_cinder_client(tenant)
 
     print "Backing up metadata of cinder volume " + volume.display_name
-    dump_openstack_obj(volume, os.path.join(get_backup_base_path(tenant), "cinder", "vol_" + volume.display_name + ".json"))
+    dump_openstack_obj(volume, os.path.join(get_backup_base_path(tenant.id), "cinder", "vol_" + volume.display_name + ".json"))
 
     if detach_volume(volume):
         print "Backing up volume " + volume.display_name
@@ -442,13 +454,13 @@ def backup_cinder(tenant):
     Params: tenant object
     """
     backups = {}
-    ensure_dir_exists(os.path.join(get_backup_base_path(tenant), "cinder"))
+    ensure_dir_exists(os.path.join(get_backup_base_path(tenant.id), "cinder"))
     cinder = get_cinder_client(tenant)
 
     for volume in cinder.volumes.list():
         (backup_id, backup_name) = backup_cinder_volume(tenant, volume)
 
         if backup_id:
-            backups[backup_id] = backup_name
+            backups[backup_id] = (tenant.id, backup_name)
 
     wait_for_glance_upload_to_finish(backups, tenant, output_dir="cinder")
