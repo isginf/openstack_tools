@@ -32,7 +32,7 @@ import atexit
 import keystoneclient.v2_0.client as keystone_client
 from openstack_lib import get_keystone_client, backup_keystone, backup_nova, backup_glance, backup_cinder
 from openstack_lib import get_backup_base_path, ensure_dir_exists, cleanup_nova_backup, cleanup_glance_backup
-
+from openstack_lib import BACKUP_BASE_PATH, keystone
 
 #
 # MAIN PART
@@ -48,7 +48,7 @@ if __name__ == '__main__':
     sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 
     # Get keystone client
-    keystone = get_keystone_client()
+    #keystone = get_keystone_client()
 
     # Retrieve tenant object
     tenant = None
@@ -58,6 +58,7 @@ if __name__ == '__main__':
     except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
         tenant = keystone.tenants.get(sys.argv[1])
 
+    ensure_dir_exists(BACKUP_BASE_PATH)
     ensure_dir_exists(get_backup_base_path(tenant.id))
 
     # Check that admin user is in the tenant we want to backup

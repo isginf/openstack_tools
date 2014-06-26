@@ -28,6 +28,7 @@ import sys
 import json
 import functools
 from time import sleep
+from pickle import PicklingError
 from multiprocessing import Pool, TimeoutError
 from novaclient.exceptions import Conflict as NovaConflict
 import keystoneclient.v2_0.client as keystone_client
@@ -191,7 +192,7 @@ def backup_nova(tenant):
     """
     backups = {}
     nova = get_nova_client(tenant)
-    glance = get_glance_client()
+    # glance = get_glance_client()
 
     ensure_dir_exists(os.path.join(get_backup_base_path(tenant.id), "nova"))
 
@@ -202,7 +203,7 @@ def backup_nova(tenant):
             backups[backup_image_id] = (tenant.id, srv.name)
 
     # wait for snapshots to finish
-    wait_for_glance_upload_to_finish(backups, tenant, output_dir="nova")
+    wait_for_glance_upload_to_finish(backups, tenant, output_dir = "nova")
 
 
 def cleanup_nova_backup(tenant):
@@ -229,17 +230,19 @@ def get_glance_client():
     keystone = get_keystone_client()
     glance_endpoint = keystone.service_catalog.url_for(service_type='image',
                                                        endpoint_type='publicURL')
-    return glance_client.Client('2',glance_endpoint, token=keystone.auth_token)
+    glance = glance_client.Client('2',glance_endpoint, token=keystone.auth_token)
+    keystone = None
+    return glance
 
 
 def glance_check_upload(params, output_dir):
     """
     Check if an upload to glance has finished
     If one has finished start a download immediately
-    Params: tupel of image id, name for output, output directory name relative to backup_base_path
+    Params: tupel of image id, tenant id, name for output
     Returns: True for success, False for failure or None for not finished
     """
-    glance = get_glance_client()
+    # glance = get_glance_client()
     image_id = params[0]
     tenant_id = params[1][0]
     display_name = params[1][1]
@@ -255,6 +258,7 @@ def glance_check_upload(params, output_dir):
         print "\nFailed to get status of image " + display_name + "\n" + str(e) + "\n"
         return (image_id, False)
 
+    # glance = None
     return (image_id, None)
 
 
@@ -274,15 +278,13 @@ def cinder_glance_check_upload(params):
 def wait_for_glance_upload_to_finish(backups, tenant, output_dir):
     """
     Wait until all glance uploads have finished (or failed)
-    Params: dictionary of image id and display name, tenant object,
+    Params: dictionary of image id, display name, output_dir tenant object,
             output directory name relative to backup base path
     """
     pool = Pool()
     check_func = None
-    glance = get_glance_client()
+    # glance = get_glance_client()
     upload_wait = GLANCE_UPLOAD_TIMEOUT
-    #check_func = create_glance_check_upload(tenant, output_dir)
-    check_func = None
 
     if output_dir == "nova":
         check_func = nova_glance_check_upload
@@ -304,6 +306,8 @@ def wait_for_glance_upload_to_finish(backups, tenant, output_dir):
         except HTTPNotFound:
             if backups.get(backup_id):
                 del backups[backup_id]
+        except PicklingError, e:
+            print "Got error " + str(e)
         except TimeoutError:
             pass
         except KeyboardInterrupt:
@@ -315,13 +319,15 @@ def wait_for_glance_upload_to_finish(backups, tenant, output_dir):
            upload_wait -= 1
            sleep(3)
 
+    # glance = None
+
 
 def download_glance_image(image_id, output_file):
     """
     Download a glance image specified by image_id and save it into output_file
     Params: image_id, output_file name
     """
-    glance = get_glance_client()
+    # glance = get_glance_client()
 
     print "Downloading image " + image_id
     fh = open(output_file, "wb")
@@ -329,22 +335,38 @@ def download_glance_image(image_id, output_file):
     try:
         for chunk in glance.images.data(image_id):
             fh.write(chunk)
-
+    except PicklingError, e:
+        print "Error saving image " + image_id + ": " + str(e)
+        return False
     except HTTPNotFound, e:
         print "Error downloading image " + image_id + ": " + str(e)
+        return False
     finally:
         fh.close()
+        # glance = None
+
+    return True
 
 
-def backup_glance_image(tenant, img):
+def backup_glance_image(params):
     """
     Dump meta data of glance image in a json file and store the image in another file
-    Params: tenant object, image object
+    Params: tupel of tenant_id, glance image id
     """
+    tenant_id = params[0]
+    img_id = params[1]
+
+    backup_path = os.path.join(get_backup_base_path(tenant_id), "glance")
+
+    # glance = get_glance_client()
+    img = glance.images.get(img_id)
     print "Backing up metadata of glance image " + img.name
-    backup_path = os.path.join(get_backup_base_path(tenant.id), "glance")
+
     dump_openstack_obj(img, os.path.join(backup_path, img.name + ".json"))
     download_glance_image(img.id, os.path.join(backup_path, img.name + ".img"))
+
+    # glance = None
+    return True
 
 
 def backup_glance(tenant):
@@ -353,11 +375,11 @@ def backup_glance(tenant):
     Params: tenant object
     """
     ensure_dir_exists(os.path.join(get_backup_base_path(tenant.id), "glance"))
-    glance = get_glance_client()
+    # glance = get_glance_client()
     pool = Pool()
 
     try:
-        jobs = pool.map_async(backup_glance_image, glance.images.list())
+        jobs = pool.map_async(backup_glance_image, [(tenant.id, img.id) for img in glance.images.list()])
         jobs.get()
     except KeyboardInterrupt:
         pool.terminate()
@@ -367,7 +389,7 @@ def cleanup_glance_backup():
     """
     At exit remove all glance images which names start with our backup prefix
     """
-    glance = get_glance_client()
+    # glance = get_glance_client()
     pool = Pool()
     image_ids = (img.id for img in glance.images.list() if img.name.startswith(GLANCE_BACKUP_PREFIX))
 
@@ -464,3 +486,20 @@ def backup_cinder(tenant):
             backups[backup_id] = (tenant.id, backup_name)
 
     wait_for_glance_upload_to_finish(backups, tenant, output_dir="cinder")
+
+
+#
+# GLOBAL objects
+#
+
+# keystone and therefore glance has to be global due to keystoneclient
+# using singleton and lazy loading pattern which otherwise causes max
+# recursion depth exception in parallel use :(
+keystone = keystone_client.Client(auth_url=os.environ["OS_AUTH_URL"],
+                                  username=os.environ["OS_USERNAME"],
+                                  password=os.environ["OS_PASSWORD"],
+                                  tenant_name=os.environ["OS_TENANT_NAME"])
+
+glance_endpoint = keystone.service_catalog.url_for(service_type='image',
+                                                   endpoint_type='publicURL')
+glance = glance_client.Client('2',glance_endpoint, token=keystone.auth_token)
