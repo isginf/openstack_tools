@@ -39,41 +39,40 @@ from openstack_lib import BACKUP_BASE_PATH
 # MAIN PART
 #
 
-if __name__ == '__main__':
-    # Check if we got enough params
-    if len(sys.argv) < 2:
-        print sys.argv[0] + " <tenant_id/_name>"
-        sys.exit(1)
+# Check if we got enough params
+if len(sys.argv) < 2:
+    print sys.argv[0] + " <tenant_id/_name>"
+    sys.exit(1)
 
-    # dont buffer stdout
-    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
+# dont buffer stdout
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 
-    # Get keystone client
-    keystone = get_keystone_client()
+# Get keystone client
+keystone = get_keystone_client()
 
-    # Retrieve tenant object
-    tenant = None
+# Retrieve tenant object
+tenant = None
 
-    try:
-        tenant = keystone.tenants.find(name=sys.argv[1])
-    except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
-        tenant = keystone.tenants.get(sys.argv[1])
+try:
+    tenant = keystone.tenants.find(name=sys.argv[1])
+except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
+    tenant = keystone.tenants.get(sys.argv[1])
 
-    ensure_dir_exists(BACKUP_BASE_PATH)
-    ensure_dir_exists(get_backup_base_path(tenant.id))
+ensure_dir_exists(BACKUP_BASE_PATH)
+ensure_dir_exists(get_backup_base_path(tenant.id))
 
-    # Check that admin user is in the tenant we want to backup
-    # otherwise add him
-    if not filter(lambda x: x.username == os.environ['OS_USERNAME'], tenant.list_users()):
-        tenant.add_user(keystone.users.find(name = os.environ['OS_USERNAME']),
-                        keystone.roles.find(name = 'admin'))
+# Check that admin user is in the tenant we want to backup
+# otherwise add him
+if not filter(lambda x: x.username == os.environ['OS_USERNAME'], tenant.list_users()):
+    tenant.add_user(keystone.users.find(name = os.environ['OS_USERNAME']),
+                    keystone.roles.find(name = 'admin'))
 
-    # Backup all stuff
-    backup_keystone(tenant)
-    backup_nova(tenant)
-    backup_glance(tenant)
-    backup_cinder(tenant)
+# Backup all stuff
+backup_keystone(tenant)
+backup_nova(tenant)
+backup_glance(tenant)
+backup_cinder(tenant)
 
-    # Clean up at the end
-    atexit.register(lambda: cleanup_nova_backup(tenant))
-    atexit.register(cleanup_glance_backup)
+# Clean up at the end
+atexit.register(lambda: cleanup_nova_backup(tenant))
+atexit.register(cleanup_glance_backup)
