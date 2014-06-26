@@ -27,11 +27,13 @@ import os
 import sys
 import json
 import functools
+from glob import glob
 from time import sleep
 from pickle import PicklingError
 from multiprocessing import Pool, TimeoutError
 from novaclient.exceptions import Conflict as NovaConflict
 import keystoneclient.v2_0.client as keystone_client
+from keystoneclient.openstack.common.apiclient.exceptions import Conflict as KeystoneConflict
 import novaclient.v1_1.client as nova_client
 from nova.compute import task_states
 import glanceclient as glance_client
@@ -50,6 +52,7 @@ GLANCE_DOWNLOAD_TIMEOUT = 600
 CINDER_BACKUP_TIMEOUT = 10
 CINDER_BACKUP_TRIES = 600
 BACKUP_BASE_PATH = '/var/openstack_backup/'
+INITIAL_PASSWORD = "youknowgodisnotagoodpassword"
 
 
 #
@@ -99,6 +102,19 @@ def dump_openstack_obj(obj, out_file=None):
         return output
 
 
+def load_openstack_obj(json_file):
+    data = None
+
+    try:
+        fh = open(json_file)
+        data = json.loads(fh.read())
+        fh.close()
+    except IOError,e:
+        print "Cannot read file " + tenant_file + " " + str(e)
+
+    return data
+
+
 def ensure_dir_exists(dir):
     """
     Create directory if it doesnt exist
@@ -133,6 +149,25 @@ def backup_keystone_user(tenant, user):
                                                  "user_" + user.name + ".json"))
 
 
+def restore_keystone_user(params):
+    """
+    """
+    tenant_id = params[0]
+    user_data = load_openstack_obj(params[1])
+
+    if user_data:
+        keystone = get_keystone_client()
+
+        try:
+            keystone.users.create(user_data['username'],
+                                  INITIAL_PASSWORD,
+                                  user_data['email'],
+                                  tenant_id,
+                                  user_data['enabled'])
+            print "Restored user " + user_data['username']
+        except KeystoneConflict, e:
+            print "User " + user_data['username'] + " already exists"
+
 def backup_keystone(tenant):
     """
     Backup all keystone data
@@ -142,8 +177,41 @@ def backup_keystone(tenant):
     ensure_dir_exists(backup_path)
 
     print "Backing up metadata of tenant " + tenant.name
-    dump_openstack_obj(tenant, os.path.join(backup_path, "project.json"))
+    dump_openstack_obj(tenant, os.path.join(backup_path, "tenant.json"))
     [backup_keystone_user(tenant, user) for user in tenant.list_users()]
+
+
+def restore_keystone_tenant(tenant_data):
+    keystone = get_keystone_client()
+    tenant = keystone.tenants.create(tenant_data['name'],
+                                   tenant_data['description'],
+                                   tenant_data['enabled'])
+
+    print "Restoring tenant " + tenant_data['name']
+
+    return tenant
+
+
+def restore_keystone(tenant_id):
+    backup_path = os.path.join(get_backup_base_path(tenant_id), "keystone")
+    tenant_file = os.path.join(backup_path, "tenant.json")
+    tenant_data = None
+
+    if os.path.exists(backup_path):
+        tenant_data = load_openstack_obj(tenant_file)
+
+        if tenant_data:
+            tenant = restore_keystone_tenant(tenant_data)
+
+            map(restore_keystone_user,
+                [(tenant.id, user_file) for user_file in glob(os.path.join(backup_path, 'user_*.json'))])
+
+#            pool = Pool()
+#            jobs = pool.map_async(restore_keystone_user,
+#                                  [(tenant.id, user_file) for user_file in glob(os.path.join(backup_path, 'user_*.json'))])
+#            jobs.get()
+    else:
+        print "ERROR " + backup_path + " does not exist!"
 
 
 #
