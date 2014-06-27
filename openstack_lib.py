@@ -310,6 +310,14 @@ def backup_nova(tenant):
     wait_for_glance_upload_to_finish(backups, tenant, output_dir = "nova")
 
 
+def restore_nova(tenant_id):
+    """
+    Restore all nova stuff
+    Params: tenant_id
+    """
+    print "restore_nova() is not implemented yet"
+
+
 def cleanup_nova_backup(tenant):
     """
     On exit reset all active vms that are still in task image uploading
@@ -624,3 +632,11 @@ def backup_cinder(tenant):
             backups[backup_id] = (tenant.id, backup_name)
 
     wait_for_glance_upload_to_finish(backups, tenant, output_dir="cinder")
+
+
+def restore_cinder(tenant_id):
+    """
+    Restore all cinder stuff
+    Params: tenant_id
+    """
+    print "restore_cinder() is not implemented yet"
