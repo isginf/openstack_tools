@@ -34,6 +34,7 @@ from multiprocessing import Pool, TimeoutError
 from novaclient.exceptions import Conflict as NovaConflict
 import keystoneclient.v2_0.client as keystone_client
 from keystoneclient.openstack.common.apiclient.exceptions import Conflict as KeystoneConflict
+from keystoneclient.openstack.common.apiclient.exceptions import NotFound as KeystoneNotFound
 import novaclient.v1_1.client as nova_client
 from nova.compute import task_states
 import glanceclient as glance_client
@@ -144,9 +145,15 @@ def backup_keystone_user(tenant, user):
     """
     print "Backing up metadata of user " + user.name
 
-    return dump_openstack_obj(user, os.path.join(get_backup_base_path(tenant.id),
-                                                 "keystone",
-                                                 "user_" + user.name + ".json"))
+    dump_openstack_obj(user, os.path.join(get_backup_base_path(tenant.id),
+                                          "keystone",
+                                          "user_" + user.name + ".json"))
+
+    for role in user.list_roles(tenant.id):
+        print "Storing role " + role.name + " for user " + user.name
+        dump_openstack_obj(role, os.path.join(get_backup_base_path(tenant.id),
+                                              "keystone",
+                                              "role_" + user.name + "_" + role.name + ".json"))
 
 
 def restore_keystone_user(params):
@@ -154,12 +161,14 @@ def restore_keystone_user(params):
     """
     tenant_id = params[0]
     user_data = load_openstack_obj(params[1])
+    backup_path = params[2]
+    user = None
 
     if user_data:
         keystone = get_keystone_client()
 
         try:
-            keystone.users.create(user_data['username'],
+            user = keystone.users.create(user_data['username'],
                                   INITIAL_PASSWORD,
                                   user_data['email'],
                                   tenant_id,
@@ -167,6 +176,19 @@ def restore_keystone_user(params):
             print "Restored user " + user_data['username']
         except KeystoneConflict, e:
             print "User " + user_data['username'] + " already exists"
+            user = keystone.users.find(name=user_data['username'])
+
+        for role_file in glob(os.path.join(backup_path, 'role_*.json')):
+            try:
+                role_data = load_openstack_obj(role_file)
+                role = keystone.roles.find(name=role_data['name'])
+                keystone.roles.add_user_role(user, role, tenant_id)
+                print "Added user " + user.name + " to tenant with role " + role.name
+            except KeystoneConflict, e:
+                pass
+            except KeystoneNotFound, e:
+                print "Role " + role_data['name'] + " cannot be found " + str(e)
+
 
 def backup_keystone(tenant):
     """
@@ -204,7 +226,7 @@ def restore_keystone(tenant_id):
             tenant = restore_keystone_tenant(tenant_data)
 
             map(restore_keystone_user,
-                [(tenant.id, user_file) for user_file in glob(os.path.join(backup_path, 'user_*.json'))])
+                [(tenant.id, user_file, backup_path) for user_file in glob(os.path.join(backup_path, 'user_*.json'))])
 
 #            pool = Pool()
 #            jobs = pool.map_async(restore_keystone_user,
