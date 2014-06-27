@@ -28,7 +28,7 @@
 
 import os
 import sys
-from openstack_lib import restore_keystone
+from openstack_lib import restore_keystone, restore_glance
 
 
 #
@@ -45,4 +45,5 @@ tenant_id = sys.argv[1]
 # dont buffer stdout
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 
-restore_keystone(tenant_id)
+#restore_keystone(tenant_id)
+restore_glance(tenant_id)

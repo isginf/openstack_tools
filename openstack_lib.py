@@ -76,11 +76,14 @@ def dump_openstack_obj(obj, out_file=None):
     If no output filename is given the json is returned as string
     Parameter: object to dump, output filename (optional)
     """
-    dump = {}
+    if isinstance(obj, str) or isinstance(obj, list) or isinstance(obj, dict):
+        dump = obj
+    else:
+        dump = {}
 
-    for (k, v) in obj.__dict__.items():
-        if not k.startswith("_") and k != "manager":
-            dump[k] = v
+        for (k, v) in obj.__dict__.items():
+            if not k.startswith("_") and k != "manager":
+                dump[k] = v
 
     if out_file:
         fh = open(out_file, "w")
@@ -466,6 +469,41 @@ def backup_glance(tenant):
         jobs.get()
     except KeyboardInterrupt:
         pool.terminate()
+
+
+def restore_glance_image(params):
+    tenant_id = params[0]
+    img_file = params[1]
+    backup_path = params[2]
+    img_data = load_openstack_obj(img_file)
+    glance = get_glance_client()
+
+    del img_data['owner']
+    del img_data['updated_at']
+    del img_data['file']
+    del img_data['id']
+    del img_data['size']
+    del img_data['checksum']
+    del img_data['created_at']
+    del img_data['schema']
+    del img_data['status']
+
+    already_exists = filter(lambda x: x.name == img_data['name'], glance.images.list())
+
+    if not already_exists:
+        glance.images.create(**img_data)
+        print "Created image " + img_data['name']
+
+
+def restore_glance(tenant_id):
+    """
+    """
+    backup_path = os.path.join(get_backup_base_path(tenant_id), "glance")
+
+    pool = Pool()
+    jobs = pool.map_async(restore_glance_image,
+                          [(tenant_id, img_file, backup_path) for img_file in glob(os.path.join(backup_path, '*.json'))])
+    jobs.get()
 
 
 def cleanup_glance_backup():
