@@ -161,6 +161,8 @@ def backup_keystone_user(tenant, user):
 
 def restore_keystone_user(params):
     """
+    Restore a keystone user and it's roles
+    Params: tupel of tenant_id, absolute name to user json file, absolute name to backup path
     """
     tenant_id = params[0]
     user_data = load_openstack_obj(params[1])
@@ -207,6 +209,11 @@ def backup_keystone(tenant):
 
 
 def restore_keystone_tenant(tenant_data):
+    """
+    Restoring a keystone tenant
+    Params: dictionary of tenant data
+    Returns: tenant object
+    """
     keystone = get_keystone_client()
     tenant = keystone.tenants.create(tenant_data['name'],
                                    tenant_data['description'],
@@ -218,6 +225,10 @@ def restore_keystone_tenant(tenant_data):
 
 
 def restore_keystone(tenant_id):
+    """
+    Restore all keystone stuff
+    Params: tenant_id
+    """
     backup_path = os.path.join(get_backup_base_path(tenant_id), "keystone")
     tenant_file = os.path.join(backup_path, "tenant.json")
     tenant_data = None
@@ -472,6 +483,10 @@ def backup_glance(tenant):
 
 
 def restore_glance_image(params):
+    """
+    Restore a glance image
+    Params: tupel of tenant_id, absolute name to image json file, absolute name to backup path
+    """
     tenant_id = params[0]
     img_file = params[1]
     backup_path = params[2]
@@ -497,6 +512,8 @@ def restore_glance_image(params):
 
 def restore_glance(tenant_id):
     """
+    Restore all glance stuff
+    Params: tenant_id
     """
     backup_path = os.path.join(get_backup_base_path(tenant_id), "glance")
 
