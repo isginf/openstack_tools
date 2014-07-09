@@ -128,6 +128,41 @@ def ensure_dir_exists(dir):
         os.mkdir(dir)
 
 
+def wait_for_action_to_finish(all_items, wait_timeout, check_func):
+    """
+    Wait until an action on all items has finished (or failed)
+    Param: dictionary of all_items with image id as key and value of tenant id and display name as tupel
+    Param: timeout in seconds
+    Param: function to check if action has finished
+    """
+    pool = Pool()
+
+    while 1:
+        try:
+            results = [check_func(x) for x in all_items.items()]
+
+            for (item_id, success) in results:
+                if success:
+                    del all_items[item_id]
+
+                # Got exception
+                elif success == False:
+                    del all_items[item_id]
+        except HTTPNotFound:
+            if all_items.get(item_id):
+                del all_items[item_id]
+        except TimeoutError:
+            pass
+        except KeyboardInterrupt:
+            pool.terminate()
+
+        if len(all_items) == 0 or wait_timeout == 0:
+            break
+        else:
+            wait_timeout -= 1
+            sleep(1)
+
+
 #
 # KEYSTONE
 #
@@ -315,7 +350,7 @@ def backup_nova(tenant):
             backups[backup_image_id] = (tenant.id, srv.name)
 
     # wait for snapshots to finish
-    wait_for_glance_upload_to_finish(backups, nova_glance_check_upload)
+    wait_for_action_to_finish(backups, GLANCE_UPLOAD_TIMEOUT, nova_glance_check_upload)
 
     # Download images from glance and delete them afterwards
     pool = Pool()
@@ -394,48 +429,6 @@ def nova_glance_check_upload(params):
 
 def cinder_glance_check_upload(params):
     return glance_check_upload(params, "cinder")
-
-def wait_for_glance_upload_to_finish(backups, check_func):
-    """
-    Wait until all glance uploads have finished (or failed)
-    Params: dictionary of backups with image id as key and value of tenant id and display name as tupel
-    """
-    pool = Pool()
-    #check_func = None
-    glance = get_glance_client()
-    upload_wait = GLANCE_UPLOAD_TIMEOUT
-
-    #if output_dir == "nova":
-    #    check_func = nova_glance_check_upload
-    #else:
-    #    check_func = cinder_glance_check_upload
-
-    while 1:
-        try:
-            results = pool.map_async(check_func, backups.items())
-
-            for (backup_id, success) in results:
-                if success:
-                    del backups[backup_id]
-
-                # Got exception
-                elif success == False:
-                    del backups[backup_id]
-        except HTTPNotFound:
-            if backups.get(backup_id):
-                del backups[backup_id]
-        except PicklingError, e:
-            print "Got error " + str(e)
-        except TimeoutError:
-            pass
-        except KeyboardInterrupt:
-            pool.terminate()
-
-        if len(backups) == 0 or upload_wait == 0:
-           break
-        else:
-           upload_wait -= 1
-           sleep(3)
 
 
 def download_nova_glance_image(params):
@@ -609,17 +602,21 @@ def detach_volume(volume):
     return True
 
 
-def backup_cinder_volume(tenant, volume):
+def backup_cinder_volume(params):
     """
     Save volume meta data as json file and trigger a backup of the volume
-    Params: tenant, volume object
+    Params: tuple of tenant_id, tenant_name, volume_id
     """
+    tenant_id = params[0]
+    tenant_name = params[1]
+    volume_id = params[2]
     backup_id = None
     backup_name = None
-    cinder = get_cinder_client(tenant.name)
+    cinder = get_cinder_client(tenant_name)
+    volume = cinder.volumes.get(volume_id)
 
     print "Backing up metadata of cinder volume " + volume.display_name
-    dump_openstack_obj(volume, os.path.join(get_backup_base_path(tenant.id), "cinder", "vol_" + volume.id + "_" + volume.display_name + ".json"))
+    dump_openstack_obj(volume, os.path.join(get_backup_base_path(tenant_id), "cinder", "vol_" + volume_id + "_" + volume.display_name + ".json"))
 
     if detach_volume(volume):
         print "Backing up volume " + volume.display_name
@@ -627,7 +624,7 @@ def backup_cinder_volume(tenant, volume):
         try:
             resp = cinder.volumes.upload_to_image(volume,
                                                   True,
-                                                  GLANCE_BACKUP_PREFIX + "_" + volume.id + "_" + tenant.name + "_" + volume.display_name,
+                                                  GLANCE_BACKUP_PREFIX + "_" + volume.id + "_" + tenant_name + "_" + volume.display_name,
                                                   "bare",
                                                   "raw")
             backup_id = resp[1]['os-volume_upload_image']['image_id']
@@ -646,22 +643,49 @@ def backup_cinder(tenant):
     Params: tenant object
     """
     backups = {}
+    backup_params = []
     ensure_dir_exists(os.path.join(get_backup_base_path(tenant.id), "cinder"))
     cinder = get_cinder_client(tenant.name)
     glance = get_glance_client()
+    pool = Pool()
 
     for volume in cinder.volumes.list():
-        (backup_id, backup_name) = backup_cinder_volume(tenant, volume)
+        backup_params.append((tenant.id, tenant.name, volume.id))
 
+    results = pool.map(backup_cinder_volume, backup_params)
+
+    for (backup_id, backup_name) in results:
         if backup_id:
             backups[backup_id] = (tenant.id, backup_name)
 
-    wait_for_glance_upload_to_finish(backups, cinder_glance_check_upload)
+    wait_for_action_to_finish(backups, GLANCE_UPLOAD_TIMEOUT, cinder_glance_check_upload)
 
     # Download images from glance and delete them afterwards
-    pool = Pool()
-    pool.map_async(download_cinder_glance_image, backups)
-    pool.map_async(glance.images.delete, backups.keys)
+    pool.map(download_cinder_glance_image, backups)
+    pool.map(glance.images.delete, backups.keys)
+
+
+def cinder_check_volume_got_created(params):
+    """
+    Check if a cinder volume was successfully created
+    Params: tupel of image id, tenant name
+    Returns: True for success, False for failure or None for not finished
+    """
+    vol_id = params[0]
+    tenant_name = params[1][0]
+    cinder = get_cinder_client(tenant_name)
+
+    try:
+        vol = cinder.volumes.get(vol_id)
+        print "Status of volume " + vol.display_name + " is " + vol.status
+
+        if vol.status.lower() == "available":
+            return (vol_id, True)
+    except ClientException, e:
+        print "Failed to get status of volume " + vol_id + "\n" + str(e)
+        return (vol_id, False)
+
+    return (vol_id, None)
 
 
 def restore_cinder_volume(params):
@@ -688,11 +712,8 @@ def restore_cinder_volume(params):
                                       visibility="public")
     glance.images.upload(glance_img.id, open(vol_img_file, 'rb'))
 
-    # wait for glance upload
-    #wait_for_glance_upload_to_finish({glance_img.id: (tenant_id, bkp_img_name)}, cinder_glance_check_upload)
-
     # Make cinder volume from glance image and delete it afterwards
-    cinder.volumes.create(size=vol_data['size'],
+    vol = cinder.volumes.create(size=vol_data['size'],
                           display_name=vol_data['display_name'],
                           display_description=vol_data['display_description'],
                           project_id=tenant_id,
@@ -700,8 +721,12 @@ def restore_cinder_volume(params):
                           availability_zone=vol_data['availability_zone'],
                           metadata=vol_data['metadata'])
 
+    wait_for_action_to_finish({vol.id: (tenant_name,)},
+                              GLANCE_DOWNLOAD_TIMEOUT,
+                              cinder_check_volume_got_created)
+
     print "Created volume " + vol_data['display_name']
-#    glance.images.delete(glance_img.id)
+    glance.images.delete(glance_img.id)
 
 
 def restore_cinder(old_tenant_id, new_tenant):
