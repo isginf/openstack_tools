@@ -40,12 +40,12 @@ if len(sys.argv) < 2:
     print sys.argv[0] + " <tenant_id>"
     sys.exit(1)
 
-tenant_id = sys.argv[1]
+old_tenant_id = sys.argv[1]
 
 # dont buffer stdout
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 
-restore_keystone(tenant_id)
-restore_glance(tenant_id)
-restore_cinder(tenant_id)
-restore_nova(tenant_id)
+new_tenant = restore_keystone(old_tenant_id)
+restore_glance(old_tenant_id)
+restore_cinder(old_tenant_id, new_tenant)
+restore_nova(old_tenant_id)
