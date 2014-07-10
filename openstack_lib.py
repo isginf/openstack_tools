@@ -30,6 +30,7 @@ import functools
 from glob import glob
 from time import sleep
 from pickle import PicklingError
+from copy import deepcopy
 from multiprocessing import Pool, TimeoutError
 from novaclient.exceptions import Conflict as NovaConflict
 import keystoneclient.v2_0.client as keystone_client
@@ -132,35 +133,37 @@ def wait_for_action_to_finish(all_items, wait_timeout, check_func):
     """
     Wait until an action on all items has finished (or failed)
     Param: dictionary of all_items with image id as key and value of tenant id and display name as tupel
-    Param: timeout in seconds
+    Param: timeout in seconds/3
     Param: function to check if action has finished
     """
     pool = Pool()
+    my_items = deepcopy(all_items)
+    my_wait_timeout = deepcopy(wait_timeout)
 
     while 1:
         try:
-            results = [check_func(x) for x in all_items.items()]
+            results = [check_func(x) for x in my_items.items()]
 
             for (item_id, success) in results:
                 if success:
-                    del all_items[item_id]
+                    del my_items[item_id]
 
                 # Got exception
                 elif success == False:
-                    del all_items[item_id]
+                    del my_items[item_id]
         except HTTPNotFound:
-            if all_items.get(item_id):
-                del all_items[item_id]
+            if my_items.get(item_id):
+                del my_items[item_id]
         except TimeoutError:
             pass
         except KeyboardInterrupt:
             pool.terminate()
 
-        if len(all_items) == 0 or wait_timeout == 0:
+        if len(my_items) == 0 or my_wait_timeout == 0:
             break
         else:
-            wait_timeout -= 1
-            sleep(1)
+            my_wait_timeout -= 1
+            sleep(3)
 
 
 #
@@ -354,8 +357,8 @@ def backup_nova(tenant):
 
     # Download images from glance and delete them afterwards
     pool = Pool()
-    pool.map_async(download_nova_glance_image, backups)
-    pool.map_async(glance.images.delete, backups.keys)
+    pool.map(download_nova_glance_image, backups.items())
+    pool.map(glance_delete, backups.keys())
 
 
 def restore_nova(tenant_id):
@@ -430,18 +433,21 @@ def nova_glance_check_upload(params):
 def cinder_glance_check_upload(params):
     return glance_check_upload(params, "cinder")
 
+def glance_delete(image_id):
+    glance = get_glance_client()
+    return glance.images.delete(image_id)
 
 def download_nova_glance_image(params):
     image_id = params[0]
-    tenant_id = params[1]
-    display_name = params[2]
+    tenant_id = params[1][0]
+    display_name = params[1][1]
     output_dir = os.path.join(get_backup_base_path(tenant_id), "nova")
     download_glance_image(image_id, os.path.join(output_dir, display_name + ".img"))
 
 def download_cinder_glance_image(params):
     image_id = params[0]
-    tenant_id = params[1]
-    display_name = params[2]
+    tenant_id = params[1][0]
+    display_name = params[1][1]
     output_dir = os.path.join(get_backup_base_path(tenant_id), "cinder")
     download_glance_image(image_id, os.path.join(output_dir, display_name + ".img"))
 
@@ -501,8 +507,7 @@ def backup_glance(tenant):
     pool = Pool()
 
     try:
-        jobs = pool.map_async(backup_glance_image, [(tenant.id, img.id) for img in glance.images.list()])
-        jobs.get()
+        pool.map(backup_glance_image, [(tenant.id, img.id) for img in glance.images.list()])
     except KeyboardInterrupt:
         pool.terminate()
 
@@ -654,15 +659,15 @@ def backup_cinder(tenant):
 
     results = pool.map(backup_cinder_volume, backup_params)
 
-    for (backup_id, backup_name) in results:
-        if backup_id:
-            backups[backup_id] = (tenant.id, backup_name)
+    for result in results:
+        if result[0]:
+            backups[result[0]] = (tenant.id, result[1])
 
     wait_for_action_to_finish(backups, GLANCE_UPLOAD_TIMEOUT, cinder_glance_check_upload)
 
     # Download images from glance and delete them afterwards
-    pool.map(download_cinder_glance_image, backups)
-    pool.map(glance.images.delete, backups.keys)
+    pool.map(download_cinder_glance_image, backups.items())
+    pool.map(glance_delete, backups.keys())
 
 
 def cinder_check_volume_got_created(params):
