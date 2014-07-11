@@ -24,9 +24,7 @@
 #
 
 import os
-import sys
 import json
-import functools
 from glob import glob
 from time import sleep
 from pickle import PicklingError
@@ -40,8 +38,10 @@ import novaclient.v1_1.client as nova_client
 from nova.compute import task_states
 import glanceclient as glance_client
 import cinderclient.client as cinder_client
-from cinderclient.exceptions import ClientException, BadRequest
-from glanceclient.exc import HTTPNotFound
+from cinderclient.exceptions import ClientException as CinderClientException
+from cinderclient.exceptions import BadRequest as CinderBadRequest
+from glanceclient.exc import HTTPNotFound as GlanceNotFound
+from glanceclient.exc import HTTPInternalServerError as GlanceInternalServerError
 
 
 #
@@ -151,7 +151,7 @@ def wait_for_action_to_finish(all_items, wait_timeout, check_func):
                 # Got exception
                 elif success == False:
                     del my_items[item_id]
-        except HTTPNotFound:
+        except (GlanceNotFound, GlanceInternalServerError):
             if my_items.get(item_id):
                 del my_items[item_id]
         except TimeoutError:
@@ -285,11 +285,6 @@ def restore_keystone(tenant_id):
 
             map(restore_keystone_user,
                 [(tenant.id, user_file, backup_path) for user_file in glob(os.path.join(backup_path, 'user_*.json'))])
-
-#            pool = Pool()
-#            jobs = pool.map_async(restore_keystone_user,
-#                                  [(tenant.id, user_file) for user_file in glob(os.path.join(backup_path, 'user_*.json'))])
-#            jobs.get()
     else:
         print "ERROR " + backup_path + " does not exist!"
 
@@ -379,8 +374,7 @@ def cleanup_nova_backup(tenant):
     vm_ids = (vm.id for vm in nova.servers.list() if getattr(vm, 'OS-EXT-STS:task_state') == task_states.IMAGE_UPLOADING and \
                                                      vm.status.lower() == 'active')
 
-    jobs = pool.map_async(lambda vm: vm.reset_state('active'), vm_ids)
-    jobs.get()
+    pool.map(lambda vm: vm.reset_state('active'), vm_ids)
 
 
 #
@@ -413,7 +407,7 @@ def glance_check_upload(params, output_dir):
 
         if backup_image.status.lower() == 'active':
             return (image_id, True)
-    except glance_client.exc.HTTPNotFound, e:
+    except (GlanceNotFound, GlanceInternalServerError), e:
         print "\nFailed to get status of image " + display_name + "\n" + str(e) + "\n"
         return (image_id, False)
 
@@ -468,7 +462,7 @@ def download_glance_image(image_id, output_file):
     except PicklingError, e:
         print "Error saving image " + image_id + ": " + str(e)
         return False
-    except HTTPNotFound, e:
+    except GlanceNotFound, e:
         print "Error downloading image " + image_id + ": " + str(e)
         return False
     finally:
@@ -548,9 +542,8 @@ def restore_glance(tenant_id):
     backup_path = os.path.join(get_backup_base_path(tenant_id), "glance")
 
     pool = Pool()
-    jobs = pool.map_async(restore_glance_image,
-                    [(tenant_id, img_file, backup_path) for img_file in glob(os.path.join(backup_path, '*.json'))])
-    jobs.get()
+    pool.map(restore_glance_image,
+             [(tenant_id, img_file, backup_path) for img_file in glob(os.path.join(backup_path, '*.json'))])
 
 
 def cleanup_glance_backup():
@@ -559,10 +552,9 @@ def cleanup_glance_backup():
     """
     glance = get_glance_client()
     pool = Pool()
-    image_ids = (img.id for img in glance.images.list() if img.name.startswith(GLANCE_BACKUP_PREFIX))
+    image_ids = (img.id for img in glance.images.list() if img.name.startswith(GLANCE_BACKUP_PREFIX) and img.status != "deleted")
 
-    jobs = pool.map_async(glance.images.delete, image_ids)
-    jobs.get()
+    pool.map(glance_delete, image_ids)
 
 
 
@@ -590,7 +582,7 @@ def attach_volume(tenant, volume_id, vm_id, device):
     try:
         volume = cinder.volumes.get(volume_id)
         volume.attach(vm_id, device)
-    except BadRequest,e :
+    except CinderBadRequest,e :
         print "Error volume " + volume.display_name + " could not be attached on vm " + vm_id + " as device " + device + "\n" + str(e) + "\n"
 
 def detach_volume(volume):
@@ -601,7 +593,7 @@ def detach_volume(volume):
     if volume.status == 'in-use':
         try:
             volume.detach()
-        except ClientException, e:
+        except CinderClientException, e:
             print "ERROR volume " + volume.display_name + " could not be detached!\n" + str(e) + "\n"
             return False
     return True
@@ -634,9 +626,9 @@ def backup_cinder_volume(params):
                                                   "raw")
             backup_id = resp[1]['os-volume_upload_image']['image_id']
             backup_name = resp[1]['os-volume_upload_image']['image_name']
-        except BadRequest, e:
+        except CinderBadRequest, e:
             print "ERROR volume " + volume.display_name + " could not be backuped!\n" + str(e) + "\n"
-        except ClientException, e:
+        except CinderClientException, e:
             print "ERROR volume " + volume.display_name + " could not be backuped!\n" + str(e) + "\n"
 
     return (backup_id, backup_name)
@@ -667,7 +659,7 @@ def backup_cinder(tenant):
 
     # Download images from glance and delete them afterwards
     pool.map(download_cinder_glance_image, backups.items())
-    pool.map(glance_delete, backups.keys())
+    #pool.map(glance_delete, backups.keys())
 
 
 def cinder_check_volume_got_created(params):
@@ -686,7 +678,7 @@ def cinder_check_volume_got_created(params):
 
         if vol.status.lower() == "available":
             return (vol_id, True)
-    except ClientException, e:
+    except CinderClientException, e:
         print "Failed to get status of volume " + vol_id + "\n" + str(e)
         return (vol_id, False)
 

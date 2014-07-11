@@ -55,7 +55,7 @@ def remove_glance_images(tenant):
     glance_endpoint = keystone.service_catalog.url_for(service_type='image',
                                                        endpoint_type='publicURL')
     glance = glance_client.Client('2',glance_endpoint, token=keystone.auth_token)
-    image_ids = (img.id for img in glance.images.list() if img.owner == tenant.id and not img.visibility == 'public')
+    image_ids = (img.id for img in glance.images.list() if img.owner == tenant.id and not img.visibility == 'public' and not img.status == 'deleted')
 
     for img in image_ids:
         print "Removing image " + img
