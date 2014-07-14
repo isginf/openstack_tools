@@ -108,6 +108,11 @@ def dump_openstack_obj(obj, out_file=None):
 
 
 def load_openstack_obj(json_file):
+    """
+    Read openstack object json file into dictionary
+    Parameters: path to json file
+    Returns dictionary
+    """
     data = None
 
     try:
@@ -294,11 +299,13 @@ def restore_keystone(tenant_id):
 #
 # NOVA
 #
-def get_nova_client(tenant):
+def get_nova_client(tenant_id):
     """
     Instantiate and return a nova client
-    Params: tenant object
+    Params: tenant id
     """
+    keystone = get_keystone_client()
+    tenant = keystone.tenants.get(tenant_id)
     return nova_client.Client(username=os.environ["OS_USERNAME"],
                               api_key=os.environ["OS_PASSWORD"],
                               auth_url=os.environ["OS_AUTH_URL"],
@@ -336,7 +343,7 @@ def backup_nova(tenant):
     Params: tenant object
     """
     backups = {}
-    nova = get_nova_client(tenant)
+    nova = get_nova_client(tenant.id)
     glance = get_glance_client()
     output_dir = os.path.join(get_backup_base_path(tenant.id), "nova")
     ensure_dir_exists(output_dir)
@@ -345,7 +352,7 @@ def backup_nova(tenant):
         backup_image_id = backup_nova_vm(tenant, srv)
 
         if backup_image_id:
-            backups[backup_image_id] = (tenant.id, srv.name)
+            backups[backup_image_id] = (tenant.id, srv.id + "_" + srv.name)
 
     # wait for snapshots to finish
     wait_for_action_to_finish(backups, GLANCE_UPLOAD_TIMEOUT, nova_glance_check_upload)
@@ -356,12 +363,71 @@ def backup_nova(tenant):
     pool.map(glance_delete, backups.keys())
 
 
-def restore_nova(tenant_id):
+def nova_check_vm_got_created(params):
+    """
+    Check if a nova vm was successfully created
+    Params: tupel of vm id, tenant id
+    Returns: True for success, False for failure or None for not finished
+    """
+    vm_id = params[0]
+    tenant_id = params[1]
+    nova = get_nova_client(tenant_id)
+
+    try:
+        vm = nova.servers.get(vm_id)
+        print "Status of volume " + vm.name + " is " + vm.status
+
+        if vm.status.upper() == "ACTIVE":
+            return (vm_id, True)
+    except NovaConflict, e:
+        print "Failed to get status of vm " + vm_id + "\n" + str(e)
+        return (vm_id, False)
+
+    return (vm_id, None)
+
+
+def restore_nova_vm(params):
+    """
+    Restore a single vm
+    Params: tuple of new tenant_id, path to vm json file, backup dir
+    """
+    new_tenant_id = params[0]
+    vm_file = params[1]
+    backup_path = params[2]
+    vm_data = load_openstack_obj(vm_file)
+    bkp_img_name = "vm_" + vm_data['name']
+    vm_img_file = os.path.join(backup_path, vm_data['id'] + "_" + vm_data['name'] + '.img')
+
+    nova = get_nova_client(new_tenant_id)
+    glance = get_glance_client()
+
+    print "Uploading image " + bkp_img_name
+    glance_img = glance.images.create(container_format="bare",
+                                      disk_format="qcow2",
+                                      name=bkp_img_name,
+                                      visibility="public")
+    glance.images.upload(glance_img.id, open(vm_img_file, 'rb'))
+
+    vm = nova.servers.create(vm_data['name'],
+                             glance_img.id,
+                             vm_data['flavor']['id'])
+
+    wait_for_action_to_finish({vm.id: (new_tenant_id,)},
+                              GLANCE_DOWNLOAD_TIMEOUT,
+                              nova_check_vm_got_created)
+
+    print "Restored vm " + vm_data['name']
+    glance.images.delete(glance_img.id)
+
+
+def restore_nova(old_tenant_id, new_tenant):
     """
     Restore all nova stuff
-    Params: tenant_id
+    Params: old tenant_id, new tenant object
     """
-    print "restore_nova() is not implemented yet"
+    backup_path = os.path.join(get_backup_base_path(old_tenant_id), "nova")
+    map(restore_nova_vm,
+        [(new_tenant.id, vm_file, backup_path) for vm_file in glob(os.path.join(backup_path, '*.json'))])
 
 
 def cleanup_nova_backup(tenant):
@@ -369,7 +435,7 @@ def cleanup_nova_backup(tenant):
     On exit reset all active vms that are still in task image uploading
     Params: tenant object
     """
-    nova = get_nova_client(tenant)
+    nova = get_nova_client(tenant.id)
     pool = Pool()
     vm_ids = (vm.id for vm in nova.servers.list() if getattr(vm, 'OS-EXT-STS:task_state') == task_states.IMAGE_UPLOADING and \
                                                      vm.status.lower() == 'active')
@@ -506,6 +572,16 @@ def backup_glance(tenant):
         pool.terminate()
 
 
+def glance_image_exists(img_name):
+    """
+    Check if a glance image with the same name already exists
+    Parameters: image name
+    Returns boolean
+    """
+    glance = get_glance_client()
+    return filter(lambda x: x.name == img_name, glance.images.list())
+
+
 def restore_glance_image(params):
     """
     Restore a glance image
@@ -527,9 +603,7 @@ def restore_glance_image(params):
     del img_data['schema']
     del img_data['status']
 
-    already_exists = filter(lambda x: x.name == img_data['name'], glance.images.list())
-
-    if not already_exists:
+    if not glance_image_exists(img_data['name']):
         glance.images.create(**img_data)
         print "Created image " + img_data['name']
 
@@ -732,8 +806,6 @@ def restore_cinder(old_tenant_id, new_tenant):
     Params: id of old tenant (used for backup on disk), new tenant object
     """
     backup_path = os.path.join(get_backup_base_path(old_tenant_id), "cinder")
-    keystone = get_keystone_client()
-
 
     map(restore_cinder_volume,
         [(old_tenant_id, new_tenant.name, vol_file, backup_path) for vol_file in glob(os.path.join(backup_path, '*.json'))])
