@@ -733,7 +733,7 @@ def backup_cinder(tenant):
 
     # Download images from glance and delete them afterwards
     pool.map(download_cinder_glance_image, backups.items())
-    #pool.map(glance_delete, backups.keys())
+    pool.map(glance_delete, backups.keys())
 
 
 def cinder_check_volume_got_created(params):
