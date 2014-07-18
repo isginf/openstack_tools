@@ -567,7 +567,7 @@ def backup_glance(tenant):
     pool = Pool()
 
     try:
-        pool.map(backup_glance_image, [(tenant.id, img.id) for img in glance.images.list()])
+        pool.map(backup_glance_image, [(tenant.id, img.id) for img in glance.images.list() if img.owner == tenant.id])
     except KeyboardInterrupt:
         pool.terminate()
 
