@@ -34,6 +34,8 @@ import glanceclient as glance_client
 import cinderclient.client as cinder_client
 from cinderclient.exceptions import ClientException, BadRequest
 from glanceclient.exc import HTTPNotFound
+from neutronclient.neutron import client as neutron_client
+from neutronclient.common.exceptions import NeutronClientException
 
 
 #
@@ -118,6 +120,67 @@ def remove_cinder_volumes(tenant):
             print "Could not remove volume " + volume.display_name + " " + str(e)
 
 
+def remove_neutron_networks(tenant):
+    """
+    Delete all neutron ports, subnets, networks and routers
+    Params: tenant object
+    """
+    neutron = neutron_client.Client('2.0',
+                                    username=os.environ["OS_USERNAME"],
+                                    password=os.environ["OS_PASSWORD"],
+                                    tenant_name=tenant.name,
+                                    auth_url=os.environ["OS_AUTH_URL"])
+
+    try:
+        # Remove security groups and their rules
+        for security_group in neutron.list_security_groups(tenant_id=tenant.id)['security_groups']:
+            for security_group_rule in security_group['security_group_rules']:
+                neutron.delete_security_group_rule(security_group_rule['id'])
+
+            print "Deleting security group " + str(security_group['id'])
+            neutron.delete_security_group(security_group['id'])
+
+        # Remove floating ips
+        for floating_ip in neutron.list_floatingips(tenant_id=tenant.id)['floatingips']:
+            print "Deleting floating ip " + str(floating_ip['id'])
+            neutron.delete_floatingip(floating_ip['id'])
+
+        # Remove router interfaces
+        for router in neutron.list_routers(tenant_id=tenant.id)['routers']:
+            for port in neutron.list_ports(device_id=router['id'])['ports']:
+                for subnet in port['fixed_ips']:
+                    # not an interface to the external net
+                    if not neutron.show_network(neutron.show_subnet(subnet['subnet_id'])['subnet']['network_id'])['network']['router:external']:
+                        print "Deleting router interface " + port['id']
+                        neutron.remove_interface_router(str(router['id']), {'subnet_id': subnet['subnet_id']})
+
+        # Remove remaining ports
+        for port in neutron.list_ports(tenant_id=tenant.id)['ports']:
+            print "Deleting port " + port['id']
+            neutron.delete_port(port['id'])
+
+        # Remove quotas
+        for quota in neutron.list_quotas(tenant_id=tenant.id)['quotas']:
+            print "Deleting quota " + str(quota['id'])
+            neutron.delete_quota(quota['id'])
+
+        # Remove networks and their subnets
+        for network in neutron.list_networks(tenant_id=tenant.id)['networks']:
+            for subnet in network['subnets']:
+                print "Deleting subnet " + subnet
+                neutron.delete_subnet(subnet)
+
+            print "Deleting network " + network['name']
+            neutron.delete_network(network['id'])
+
+        # Remove router
+        for router in neutron.list_routers(tenant_id=tenant.id)['routers']:
+            print "Deleting router " + router['name']
+            neutron.delete_router(router['id'])
+    except NeutronClientException, e:
+        print "Neutron command failed. " + str(e)
+
+
 #
 # MAIN PART
 #
@@ -125,11 +188,16 @@ def remove_cinder_volumes(tenant):
 if __name__ == '__main__':
     # Check if we got enough params
     if len(sys.argv) < 2:
-        print sys.argv[0] + " <tenant_id/_name>"
+        print sys.argv[0] + " <tenant_id/_name> [subsystem]"
         sys.exit(1)
 
     # dont buffer stdout
     sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
+
+    subsystems = {'glance': remove_glance_images,
+                  'nova': remove_nova_vms,
+                  'cinder': remove_cinder_volumes,
+                  'neutron': remove_neutron_networks}
 
     # Get keystone client and tenant
     keystone = keystone_client.Client(auth_url=os.environ["OS_AUTH_URL"],
@@ -143,16 +211,33 @@ if __name__ == '__main__':
     except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
         tenant = keystone.tenants.get(sys.argv[1])
 
+    # Check that admin user is in the tenant we want to backup
+    # otherwise add him
+    if not filter(lambda x: x.username == os.environ['OS_USERNAME'], tenant.list_users()):
+        tenant.add_user(keystone.users.find(name = os.environ['OS_USERNAME']),
+                        keystone.roles.find(name = 'admin'))
+
+    # Remove only one subsystem?
+    if len(sys.argv) > 2:
+        subsystem_func = subsystems.get(sys.argv[2])
+
+        if subsystem_func:
+            subsystem_func(tenant)
+        else:
+            print "Unknown subsystem " + sys.argv[2]
+
     # Delete all stuff
-    remove_glance_images(tenant)
-    remove_nova_vms(tenant)
-    remove_cinder_volumes(tenant)
+    else:
+        remove_glance_images(tenant)
+        remove_nova_vms(tenant)
+        remove_cinder_volumes(tenant)
+        remove_neutron_networks(tenant)
 
-    # If a user with the same name of tenant exists delete it too
-    try:
-        user = keystone.users.find(name=tenant.name)
-        user.delete()
-    except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
-        pass
+        # If a user with the same name of tenant exists delete it too
+        try:
+            user = keystone.users.find(name=tenant.name)
+            user.delete()
+        except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
+            pass
 
-    tenant.delete()
+        tenant.delete()
