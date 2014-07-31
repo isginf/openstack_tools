@@ -42,6 +42,8 @@ from cinderclient.exceptions import ClientException as CinderClientException
 from cinderclient.exceptions import BadRequest as CinderBadRequest
 from glanceclient.exc import HTTPNotFound as GlanceNotFound
 from glanceclient.exc import HTTPInternalServerError as GlanceInternalServerError
+from neutronclient.neutron import client as neutron_client
+from neutronclient.common.exceptions import NeutronClientException
 
 
 #
@@ -809,3 +811,18 @@ def restore_cinder(old_tenant_id, new_tenant):
 
     map(restore_cinder_volume,
         [(old_tenant_id, new_tenant.name, vol_file, backup_path) for vol_file in glob(os.path.join(backup_path, '*.json'))])
+
+
+#
+# Neutron
+#
+def get_neutron_client(tenant_name):
+    """
+    Instantiate and return a neutron client
+    Params: tenant name
+    """
+    return neutron_client.Client('2.0',
+                                 username=os.environ["OS_USERNAME"],
+                                 password=os.environ["OS_PASSWORD"],
+                                 tenant_name=tenant_name,
+                                 auth_url=os.environ["OS_AUTH_URL"])
