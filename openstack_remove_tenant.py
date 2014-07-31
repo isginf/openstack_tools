@@ -133,13 +133,19 @@ def remove_neutron_networks(tenant):
 
     try:
         # Remove security groups and their rules
+        for security_group_rule in neutron.list_security_group_rules(tenant_id=tenant.id)['security_group_rules']:
+            neutron.delete_security_group_rule(security_group_rule['id'])
+
         for security_group in neutron.list_security_groups(tenant_id=tenant.id)['security_groups']:
             for security_group_rule in security_group['security_group_rules']:
                 neutron.delete_security_group_rule(security_group_rule['id'])
 
             print "Deleting security group " + str(security_group['id'])
             neutron.delete_security_group(security_group['id'])
+    except NeutronClientException, e:
+        print "Neutron command failed. " + str(e)
 
+    try:
         # Remove floating ips
         for floating_ip in neutron.list_floatingips(tenant_id=tenant.id)['floatingips']:
             print "Deleting floating ip " + str(floating_ip['id'])
