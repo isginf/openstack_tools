@@ -3,7 +3,7 @@
 #
 # Automatically migrate all vms of a given hypervisor to other nova compute nodes
 #
-# Copyright 2013 ETH Zurich, ISGINF, Bastian Ballmann
+# Copyright 2014 ETH Zurich, ISGINF, Bastian Ballmann
 # E-Mail: bastian.ballmann@inf.ethz.ch
 # Web: http://www.isg.inf.ethz.ch
 #
@@ -35,10 +35,6 @@ import novaclient.v1_1.client as nvclient
 
 ###[ Configuration ]###
 
-username = "admin"
-password = ""
-tenant = ""
-auth_url = "http://127.0.0.1:5000/v2.0/"
 migration_timeout = 180
 final_wait_timeout = 300
 nova_dir="/var/lib/nova"
@@ -156,7 +152,10 @@ def wait_for_migrations_to_complete():
 ###[ MAIN PART ]###
 
 # get nova client and hypervisor objects
-nova = nvclient.Client(username, password, tenant, auth_url)
+nova = nvclient.Client(os.environ['OS_USERNAME'],
+                       os.environ['OS_PASSWORD'],
+                       os.environ['OS_TENANT_NAME'],
+                       os.environ['OS_AUTH_URL'])
 hypervisor = get_hypervisor_for_host(hostname)
 
 if not hypervisor:
