@@ -35,6 +35,7 @@ import novaclient.v1_1.client as nvclient
 
 ###[ Configuration ]###
 
+block_migration = True
 migration_timeout = 180
 final_wait_timeout = 300
 nova_dir="/var/lib/nova"
@@ -99,13 +100,18 @@ def migrate(vm):
 
     if vm.status == "SHUTOFF":
       log.info("%s offline migraion of vm %s" % (log_prefix(), vm.name))
-      vm.migrate()
+
+      if block_migration:
+        vm.live_migrate(block_migration=block_migration)
+      else:
+        vm.migrate()
+
       offline_migrations.append(vm)
     else:
       vm.reset_state(state="active")
       vm = nova.servers.get(vm.id)
       log.info("%s live migraion of vm %s" % (log_prefix(), vm.name))
-      vm.live_migrate()
+      vm.live_migrate(block_migration=block_migration)
 
     waiting_for_migrations.append(vm.id)
     sys.stdout.write("started\n")
@@ -209,7 +215,12 @@ if hypervisor and hasattr(hypervisor, "servers"):
       try:
         print "Offline migration of machine %s" % vm.name
         log.info("%s Offline migration of machine %s" % (log_prefix(), vm.name))
-        vm.migrate()
+
+        if block_migration:
+          vm.live_migrate(block_migration=block_migration)
+        else:
+          vm.migrate()
+
         offline_migrations.append(vm)
       except Exception, e:
         log.error("%s Got exception %s" % (log_prefix(), e))
