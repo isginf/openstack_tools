@@ -100,11 +100,7 @@ def migrate(vm):
 
     if vm.status == "SHUTOFF":
       log.info("%s offline migraion of vm %s" % (log_prefix(), vm.name))
-
-      if block_migration:
-        vm.live_migrate(block_migration=block_migration)
-      else:
-        vm.migrate()
+      vm.migrate()
 
       offline_migrations.append(vm)
     else:
@@ -215,11 +211,7 @@ if hypervisor and hasattr(hypervisor, "servers"):
       try:
         print "Offline migration of machine %s" % vm.name
         log.info("%s Offline migration of machine %s" % (log_prefix(), vm.name))
-
-        if block_migration:
-          vm.live_migrate(block_migration=block_migration)
-        else:
-          vm.migrate()
+        vm.migrate()
 
         offline_migrations.append(vm)
       except Exception, e:
