@@ -35,7 +35,8 @@ import novaclient.v1_1.client as nvclient
 
 ###[ Configuration ]###
 
-block_migration = True
+live_migration = False
+block_migration = False
 migration_timeout = 180
 final_wait_timeout = 300
 nova_dir="/var/lib/nova"
@@ -54,6 +55,7 @@ else:
 
 waiting_for_migrations = []
 offline_migrations = []
+resume_vms = []
 log = logging.getLogger('openstack_migrator')
 logging.basicConfig(
     filename = os.path.join(nova_dir, "openstack_migrator.log"),
@@ -106,9 +108,18 @@ def migrate(vm):
     else:
       vm.reset_state(state="active")
       vm = nova.servers.get(vm.id)
-      log.info("%s live migraion of vm %s" % (log_prefix(), vm.name))
-      vm.live_migrate(block_migration=block_migration)
 
+      if live_migration:
+        log.info("%s live migraion of vm %s" % (log_prefix(), vm.name))
+        vm.live_migrate(block_migration=block_migration)
+      else:
+        log.info("%s stopping vm %s" % (log_prefix(), vm.name,))
+        vm.stop()
+        resume_vms.append(vm)
+        time.sleep(5)
+        log.info("%s offline migration of vm %s" % (log_prefix(), vm.name))
+        vm = nova.servers.get(vm.id)
+        vm.migrate()
     waiting_for_migrations.append(vm.id)
     sys.stdout.write("started\n")
   except Exception, e:
@@ -118,12 +129,6 @@ def migrate(vm):
   finally:
     vm.unlock()
 
-    # if vm.status == "SHUTOFF":
-    #     vm.reset_state(state="active")
-    #     vm = nova.servers.get(vm.id)
-    #     vm.stop()
-    # else:
-    #     vm.reset_state(state="active")
 
 # wait unitl all vms in waiting_for_migration are not on this hypervisor anymore
 # or until the hypervisor has no vms left at all
@@ -163,7 +168,6 @@ hypervisor = get_hypervisor_for_host(hostname)
 if not hypervisor:
   print "Hypervisor " + hostname + " cannot be found"
   sys.exit(1)
-
 
 # check if there are any vms, trigger live migration and wait for their completion
 if hasattr(hypervisor, "servers"):
@@ -224,6 +228,15 @@ for vm in offline_migrations:
   vm.reset_state(state="active")
   vm = nova.servers.get(vm.id)
   vm.stop()
+
+# resume vms must be started
+# sometimes vms hang in state resize therefore we reset and "stop" them before starting
+for vm in resume_vms:
+  log.info("%s starting vm %s" %(log_prefix(), vm.name))
+  vm.reset_state(state="active")
+  vm.stop()
+  vm = nova.servers.get(vm.id)
+  vm.start()
 
 # All done. Cleanup.
 logging.shutdown()
