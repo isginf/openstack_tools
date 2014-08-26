@@ -35,7 +35,7 @@ import novaclient.v1_1.client as nvclient
 
 ###[ Configuration ]###
 
-live_migration = False
+live_migration = True
 block_migration = False
 migration_timeout = 180
 final_wait_timeout = 300
