@@ -445,6 +445,30 @@ def cleanup_nova_backup(tenant):
     pool.map(lambda vm: vm.reset_state('active'), vm_ids)
 
 
+def nova_check_migration(params):
+    """
+    Check if migration of vm has finished
+    Params: tupel of instance id, tenant id
+    Returns: True for success, False for failure or None for not finished
+    """
+    vm_id = params[0]
+    tenant_id = params[1][0]
+    display_name = params[1][1]
+    nova = get_nova_client(tenant_id)
+
+    try:
+        vm = nova.servers.get(vm_id)
+        print "Migration of " + display_name + " has status " + vm.status
+
+        if vm.status.lower() == 'active':
+            return (vm_id, True)
+    except NovaConflict, e:
+        print "\nFailed to get status of image " + display_name + "\n" + str(e) + "\n"
+        return (vm_id, False)
+
+    return (vm_id, None)
+
+
 #
 # GLANCE
 #

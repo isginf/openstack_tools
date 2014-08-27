@@ -31,11 +31,13 @@ import logging
 from datetime import datetime
 import novaclient.exceptions
 import novaclient.v1_1.client as nvclient
+from multiprocessing import Pool
+from openstack_lib import get_nova_client, get_keystone_client, wait_for_action_to_finish, nova_check_migration
 
 
 ###[ Configuration ]###
 
-live_migration = True
+live_migration = False
 block_migration = False
 migration_timeout = 180
 final_wait_timeout = 300
@@ -53,7 +55,6 @@ else:
 
 ###[ Subroutines ]###
 
-waiting_for_migrations = []
 offline_migrations = []
 resume_vms = []
 log = logging.getLogger('openstack_migrator')
@@ -68,6 +69,7 @@ sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 def log_prefix():
     return "[%s] %s: " %(datetime.now().strftime("%d.%m.%Y %H:%M:%S"), os.uname()[1])
 
+
 # get hypervisor object by its hostname
 def get_hypervisor_for_host(hostname):
   try:
@@ -78,16 +80,20 @@ def get_hypervisor_for_host(hostname):
   return hypervisor
 
 
+# get all vm objects for a hypervisor
+def get_vms_of_hypervisor(hypervisor):
+  return map(lambda x: nova.servers.get(x.get('uuid')), hypervisor.servers)
+
+
 # migrate a vm online or offline depending on its status
-def migrate(vm):
-  global waiting_for_migrations
-  global offline_migrations
+def migrate((tenant_id,vm_id)):
+  nova = get_nova_client(tenant_id)
+  vm = nova.servers.get(vm_id)
 
   if vm.status == "MIGRATING" or vm.status == "VERIFY_RESIZE":
       log.debug("%s vm %s is in state %s skipping migration" % (log_prefix(), vm.name, vm.status))
       return 0
 
-  sys.stdout.write("Migration of " + vm.name + " ")
   log.debug("%s Vm info %s" %(log_prefix(), vm._info))
 
   # if a resize dir exists in instances dir and vm is not currently
@@ -103,8 +109,6 @@ def migrate(vm):
     if vm.status == "SHUTOFF":
       log.info("%s offline migraion of vm %s" % (log_prefix(), vm.name))
       vm.migrate()
-
-      offline_migrations.append(vm)
     else:
       vm.reset_state(state="active")
       vm = nova.servers.get(vm.id)
@@ -115,54 +119,46 @@ def migrate(vm):
       else:
         log.info("%s stopping vm %s" % (log_prefix(), vm.name,))
         vm.stop()
-        resume_vms.append(vm)
         time.sleep(5)
         log.info("%s offline migration of vm %s" % (log_prefix(), vm.name))
         vm = nova.servers.get(vm.id)
         vm.migrate()
-    waiting_for_migrations.append(vm.id)
-    sys.stdout.write("started\n")
+    print "Migration of vm %s started.\n" % (vm.name,)
   except Exception, e:
     log.error("%s Migration of vm %s failed!\n%s" % (log_prefix(), vm.name, str(e)))
-    sys.stdout.write("failed!\n" + str(e) + "\n")
+    print "Migration of vm %s failed!\n%s\n" % (vm.name, str(e))
     log.debug("%s Vm info %s" % (log_prefix(), vm._info))
   finally:
     vm.unlock()
 
 
-# wait unitl all vms in waiting_for_migration are not on this hypervisor anymore
-# or until the hypervisor has no vms left at all
-def wait_for_migrations_to_complete():
-  global waiting_for_migrations
-  timeout_not_reached = migration_timeout
+def migrate_all_vms_of_hypervisor(hypervisor):
+  vms = get_vms_of_hypervisor(hypervisor)
+  vm_ids = map(lambda(vm): (tenant.id, vm.id), vms)
+  pool = Pool()
+  pool.map(migrate, vm_ids)
+  #map(lambda vm: migrate(vm), vms)
+  waiting_for_migrations = {}
 
-  if waiting_for_migrations:
-    log.info("%s Waiting for migrations to finish ..." % log_prefix())
-    sys.stdout.write("\nWaiting for migrations to finish ...")
+  for vm in vms:
+    waiting_for_migrations[vm.id] = (tenant.id, vm.name)
 
-    while waiting_for_migrations and timeout_not_reached:
-      sys.stdout.write(".")
-      log.debug("%s %d seconds left" % (log_prefix(), timeout_not_reached))
-      hypervisor = get_hypervisor_for_host(hostname)
+    if vm.status == "SHUTOFF":
+      offline_migrations.append(vm)
+    elif vm.status != "SHUTOFF" and not live_migration:
+      offline_migrations.append(vm)
+      resume_vms.append(vm)
 
-      if not hypervisor or not hasattr(hypervisor, "servers"):
-        waiting_for_migrations = []
-      elif hypervisor and hasattr(hypervisor, "servers"):
-        existing_vms = map(lambda x: x.get('uuid'), hypervisor.servers)
-        waiting_for_migrations = filter(lambda x: x in existing_vms, waiting_for_migrations)
+  wait_for_action_to_finish(waiting_for_migrations, migration_timeout/3, nova_check_migration)
 
-      timeout_not_reached -= 10
-      time.sleep(10)
-  sys.stdout.write("\n")
 
 
 ###[ MAIN PART ]###
 
 # get nova client and hypervisor objects
-nova = nvclient.Client(os.environ['OS_USERNAME'],
-                       os.environ['OS_PASSWORD'],
-                       os.environ['OS_TENANT_NAME'],
-                       os.environ['OS_AUTH_URL'])
+keystone = get_keystone_client()
+tenant = keystone.tenants.find(name=os.environ['OS_TENANT_NAME'])
+nova = get_nova_client(tenant.id)
 hypervisor = get_hypervisor_for_host(hostname)
 
 if not hypervisor:
@@ -171,58 +167,32 @@ if not hypervisor:
 
 # check if there are any vms, trigger live migration and wait for their completion
 if hasattr(hypervisor, "servers"):
-  map(lambda x: migrate(nova.servers.get(x.get('uuid'))), hypervisor.servers)
-  wait_for_migrations_to_complete()
+    migrate_all_vms_of_hypervisor(hypervisor)
 else:
   log.info("%s Hypervisor %s serves no vms" % (log_prefix(), hostname))
   print "Hypervisor " + hostname + " serves no vms"
 
 
-# Are there any vm left that were not migrateable?
+# Are there any vm left that were not migrateable? Try another time
 hypervisor = get_hypervisor_for_host(hostname)
 
 if hypervisor and hasattr(hypervisor, "servers"):
-  map(lambda vm: migrate(nova.servers.get(vm.get('uuid'))),
-      hypervisor.servers)
-  wait_for_migrations_to_complete()
+    migrate_all_vms_of_hypervisor(hypervisor)
 
-  # still vms left? shut em down and migrate offline
-  # try to migrate again after timeout
-  hypervisor = get_hypervisor_for_host(hostname)
+    # still vms left? shut em down and migrate offline
+    hypervisor = get_hypervisor_for_host(hostname)
 
-  if hypervisor and hasattr(hypervisor, "servers"):
-    log.info("%s There are still vms to migrate. Waiting %d seconds..." % (log_prefix(), final_wait_timeout))
-    print "\nThere are still vms to migrate. Waiting %d seconds..." % final_wait_timeout
-    time.sleep(final_wait_timeout)
+    if hypervisor and hasattr(hypervisor, "servers"):
+        for vm in get_vms_of_hypervisor(hypervisor):
+            log.debug("%s Resetting state to active" % log_prefix())
+            vm.reset_state(state="active")
+            vm = nova.servers.get(vm.id)
+            vm.stop()
 
-    for vm_dict in hypervisor.servers:
-      vm = nova.servers.get(vm_dict.get('uuid'))
-      log.debug("%s Resetting state to active" % log_prefix())
-      vm.reset_state(state="active")
-      vm = nova.servers.get(vm_dict.get('uuid'))
+        migrate_all_vms_of_hypervisor(hypervisor)
 
-      log.info("%s Stopping machine %s" % (log_prefix(), vm.name))
-      print "Stopping machine %s" % vm.name
 
-      try:
-        vm.stop()
-      except Exception,e:
-        log.error("%s Stopping failed! %s" % (log_prefix(), e))
-        log.debug("%s Vm info %s" % (log_prefix(), vm._info))
-
-      time.sleep(30)
-
-      try:
-        print "Offline migration of machine %s" % vm.name
-        log.info("%s Offline migration of machine %s" % (log_prefix(), vm.name))
-        vm.migrate()
-
-        offline_migrations.append(vm)
-      except Exception, e:
-        log.error("%s Got exception %s" % (log_prefix(), e))
-        log.debug("%s Vm info %s" % (log_prefix(), vm._info))
-
-# offline migrated machines stay in state VERIFY_RESIZE, reset them
+# offline migrated machines sometimes stay in state VERIFY_RESIZE, reset them
 for vm in offline_migrations:
   log.debug("%s Resetting state of offline migrated vm %s" % (log_prefix(), vm.name))
   vm.reset_state(state="active")
@@ -233,9 +203,6 @@ for vm in offline_migrations:
 # sometimes vms hang in state resize therefore we reset and "stop" them before starting
 for vm in resume_vms:
   log.info("%s starting vm %s" %(log_prefix(), vm.name))
-  vm.reset_state(state="active")
-  vm.stop()
-  vm = nova.servers.get(vm.id)
   vm.start()
 
 # All done. Cleanup.
