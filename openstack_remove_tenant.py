@@ -82,8 +82,12 @@ def remove_nova_vms(tenant):
     for vm in nova.servers.list():
         if vm.status.lower() == 'active':
             print "Stopping vm " + vm.name
-            vm.stop()
-            stopping_vms.append(vm.id)
+            
+            try:
+                vm.stop()
+                stopping_vms.append(vm.id)
+            except NovaConflict, e:
+                print "Could not stop vm " + vm.name + ": " + str(e)
 
     if len(stopping_vms) > 0:
         print "Waiting " + str(vm_shutdown_timeout) + " seconds for vms to shutdown"
@@ -215,7 +219,11 @@ if __name__ == '__main__':
     try:
         tenant = keystone.tenants.find(name=sys.argv[1])
     except (keystone_client.exceptions.NotFound, keystone_client.exceptions.NoUniqueMatch):
-        tenant = keystone.tenants.get(sys.argv[1])
+        try:
+            tenant = keystone.tenants.get(sys.argv[1])
+        except keystone_client.exceptions.NotFound:
+            print "Tenant " + sys.argv[1] + " does not exist"
+            sys.exit(1)
 
     # Check that admin user is in the tenant we want to backup
     # otherwise add him
